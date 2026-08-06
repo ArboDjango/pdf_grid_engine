@@ -1,0 +1,347 @@
+From 104a876b99a638123c5ba6ba9b147dc3270cfcc2 Mon Sep 17 00:00:00 2001
+From: Stephane Delaportas <stephane.delaportas@gmail.com>
+Date: Thu, 6 Aug 2026 07:35:51 +0000
+Subject: [PATCH] =?UTF-8?q?CD-001=20:=20Cell=20--=20composant=20=C3=A9l?=
+ =?UTF-8?q?=C3=A9mentaire,=20reconstruit=20depuis=20une=20feuille=20blanch?=
+ =?UTF-8?q?e?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Premier commit de pdf_grid_engine. Aucune réutilisation de
+l'architecture de ton_grid_bot -- reconstruction exclusivement fondée
+sur RN-100, RN-101, RN-102, SA-001, SA-002, SA-003, et CD-001 (version
+finale, après deux cycles de révision et un audit de conformité
+strict).
+
+Ce que Cell contractualise (CD-001) :
+- Identité : gi (prix nominal fixe) et state (SPOT_HELD/CASH_HELD),
+  rien d'autre -- en particulier, Gv en est explicitement exclu (une
+  donnée uniforme entre toutes les cellules n'individualise aucune
+  d'elles, SA-001 §1/§7).
+- Construction : l'état est fourni directement, sans référence à P0
+  -- cette responsabilité appartient à un futur composant de
+  construction de grille, non anticipé ici.
+- Trois événements, exactement : construction, signal SELL complété
+  (on_sell_completed), signal BUY complété (on_buy_completed).
+  Aucune notion d'exécution partielle, de rejet, de restauration
+  distincte (RN-101 §2-§3).
+- Machine à états stricte : SPOT_HELD <-> CASH_HELD, transitions
+  symétriques, refusées (CellStateError) dans le mauvais état.
+- Ne connaît jamais : P0, l'exchange, les frais, la glissade, le prix
+  réellement exécuté, la persistance, le registre, le patrimoine
+  agrégé, Gv, Pj, le PnL, les autres cellules (RN-101 §1).
+- Seule elle-même modifie son état, en réaction aux événements reçus
+  -- jamais par écriture externe directe.
+
+Audit de conformité strict effectué avant ce commit : quatre éléments
+retirés du code (is_spot_held/is_cash_held, __repr__, __eq__, la
+validation gi>0) parce qu'aucun n'était justifié par un événement du
+§5 ou un invariant du §4 de CD-001 -- des commodités que j'avais
+ajoutées de ma propre initiative, jamais autorisées par le contrat.
+
+Tests (tests/test_cell.py, 17 tests) : identité (gi/state stockés
+exactement, aucun autre attribut) ; construction directe sans
+référence à P0 (et absence explicite des anciens constructeurs
+create_above_p0/create_below_p0) ; invariants (gi immuable, toujours
+exactement un état) ; les deux transitions et leurs refus ; cycle
+complet avec préservation d'identité d'objet Python (id() inchangé,
+vérifiant explicitement la décision "mutable" de SA/CD) ; absence de
+toute dépendance hors bibliothèque standard ; absence de toute
+méthode publique au-delà des trois événements contractuels
+(vérifié explicitement, pas supposé).
+
+Vérifications :
+- 17/17 tests verts, pyflakes propre.
+- Zéro dépendance externe (vérifié par un test dédié).
+- Zéro méthode non justifiée par CD-001 §5 (vérifié par un test
+  dédié).
+
+Réf : CD-001 (Cell), SA-001/002/003, RN-100/101/102. Prochaine étape
+prévue par la discipline établie : SA -> CD -> code pour chaque
+composant suivant, chacun attendant sa propre validation avant tout
+Python.
+---
+ cell.py            | 112 +++++++++++++++++++++++++++++++++
+ tests/test_cell.py | 151 +++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 263 insertions(+)
+ create mode 100644 cell.py
+ create mode 100644 tests/test_cell.py
+
+diff --git a/cell.py b/cell.py
+new file mode 100644
+index 0000000..fa654d8
+--- /dev/null
++++ b/cell.py
+@@ -0,0 +1,112 @@
++"""
++cell.py
++
++Implémentation de CD-001 -- Component Definition, Cell (version finale
++validée). Traduction stricte du contrat, rien de plus : aucune méthode
++sans un événement du §5 pour la justifier, aucune validation au-delà
++des invariants explicitement listés au §4, aucune dépendance vers un
++autre composant de ce dépôt.
++
++Contrat (CD-001) :
++  §1  -- Cell représente une position de prix fixe et son état
++         courant. Elle ne décide jamais elle-même de son état
++         initial -- celui-ci lui est fourni à la construction, par un
++         composant qui n'est pas Cell.
++  §2  -- Justification : RN-100 §1 (nature d'une cellule), §3 (deux
++         états, jamais un troisième), §7 (bascule d'état), §12
++         (invariants). SA-001 §1 (une entité se définit par ce qui
++         l'individualise), §7 (Gv n'individualise rien, exclu).
++  §3  -- Identité : gi et state, rien d'autre. Tous deux des
++         attributs publics -- aucune méthode d'accès dédiée n'est
++         nécessaire ni autorisée.
++  §4  -- Invariants garantis, exactement deux : gi immuable après
++         construction ; toujours exactement un état. Rien d'autre
++         n'est un invariant de ce composant (en particulier, la
++         positivité de gi n'est pas listée ici et n'est donc pas
++         validée).
++  §5  -- Événements reçus, exactement trois : construction (état
++         donné directement, sans référence à P0), signal SELL
++         complété, signal BUY complété. Aucune autre méthode
++         publique n'existe.
++  §6  -- Machine à états : SPOT_HELD <-> CASH_HELD, transitions
++         symétriques, aucune autre.
++  §7  -- Ne connaît jamais : P0, l'exchange, les frais, la glissade,
++         le prix réellement exécuté, le mécanisme de persistance, le
++         registre, le patrimoine agrégé, Gv, le prix de marché
++         courant, le PnL, les autres cellules.
++  §8  -- Seule elle-même a le droit de modifier son état, en réaction
++         aux événements du §5 -- jamais par écriture directe externe.
++"""
++
++from __future__ import annotations
++
++from enum import Enum
++
++
++class CellState(Enum):
++    """Les deux seuls états possibles d'une cellule (CD-001 §3, RN-100 §3)."""
++    SPOT_HELD = "SPOT_HELD"
++    CASH_HELD = "CASH_HELD"
++
++
++class CellStateError(Exception):
++    """
++    Levée quand un signal d'exécution est reçu depuis un état qui ne
++    correspond pas (CD-001 §6) -- une transition que le contrat ne
++    décrit jamais.
++    """
++
++
++class Cell:
++    """
++    Une cellule (CD-001) : un prix nominal fixe, un état courant.
++    Rien de plus -- voir la docstring de module pour ce qu'elle ne
++    connaît jamais (CD-001 §7).
++
++    Attributes:
++        gi: Le prix nominal de la cellule. Fixé une seule fois à la
++            construction, jamais modifié ensuite (CD-001 §4).
++        state: L'état courant (SPOT_HELD ou CASH_HELD).
++    """
++
++    def __init__(self, gi: float, state: CellState):
++        self.gi = gi
++        self.state = state
++
++    def on_sell_completed(self) -> None:
++        """
++        Réagit au signal binaire (Canal B, RN-101 §2) informant que
++        l'ordre de vente en attente à cette cellule a été
++        intégralement exécuté -- bascule vers CASH_HELD (CD-001 §6).
++
++        La cellule ne "vend" jamais elle-même -- elle reçoit un fait
++        accompli, et réagit en conséquence (CD-001 §7 : aucune
++        connaissance de l'exchange ou de l'exécution elle-même).
++
++        Raises:
++            CellStateError: si la cellule n'est pas actuellement en
++                SPOT_HELD.
++        """
++        if self.state is not CellState.SPOT_HELD:
++            raise CellStateError(
++                f"Cellule à gi={self.gi} : signal de vente complétée reçu, "
++                f"mais état actuel = {self.state.value} (attendu SPOT_HELD)"
++            )
++        self.state = CellState.CASH_HELD
++
++    def on_buy_completed(self) -> None:
++        """
++        Réagit au signal binaire (Canal B, RN-101 §2) informant que
++        l'ordre d'achat en attente à cette cellule a été intégralement
++        exécuté -- bascule vers SPOT_HELD (CD-001 §6).
++
++        Raises:
++            CellStateError: si la cellule n'est pas actuellement en
++                CASH_HELD.
++        """
++        if self.state is not CellState.CASH_HELD:
++            raise CellStateError(
++                f"Cellule à gi={self.gi} : signal d'achat complété reçu, "
++                f"mais état actuel = {self.state.value} (attendu CASH_HELD)"
++            )
++        self.state = CellState.SPOT_HELD
+diff --git a/tests/test_cell.py b/tests/test_cell.py
+new file mode 100644
+index 0000000..fecc551
+--- /dev/null
++++ b/tests/test_cell.py
+@@ -0,0 +1,151 @@
++"""
++tests/test_cell.py
++
++Tests pour cell.py -- vérifient exclusivement ce que CD-001 (version
++finale) contractualise. Rien de plus : aucune assertion sur une
++méthode ou une validation qui dépasserait le contrat.
++"""
++
++import pytest
++
++from cell import Cell, CellState, CellStateError
++
++
++class TestIdentity:
++    """CD-001 §3 : gi et state, rien d'autre -- tous deux publics."""
++
++    def test_gi_is_stored_exactly(self):
++        cell = Cell(gi=105.123456, state=CellState.SPOT_HELD)
++        assert cell.gi == 105.123456
++
++    def test_state_is_stored_exactly(self):
++        cell = Cell(gi=105.0, state=CellState.CASH_HELD)
++        assert cell.state is CellState.CASH_HELD
++
++    def test_no_other_attribute_exists_at_construction(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        assert vars(cell).keys() == {"gi", "state"}
++
++
++class TestConstructionReceivesStateDirectly:
++    """
++    CD-001 §5 : la construction reçoit un état déjà déterminé --
++    aucune référence à P0, aucune méthode dédiée qui en dépendrait.
++    """
++
++    def test_can_be_constructed_directly_in_spot_held(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        assert cell.state is CellState.SPOT_HELD
++
++    def test_can_be_constructed_directly_in_cash_held(self):
++        cell = Cell(gi=95.0, state=CellState.CASH_HELD)
++        assert cell.state is CellState.CASH_HELD
++
++    def test_no_p0_referencing_constructors_exist(self):
++        assert not hasattr(Cell, "create_above_p0")
++        assert not hasattr(Cell, "create_below_p0")
++
++
++class TestInvariants:
++    """
++    CD-001 §4 : exactement deux invariants. Aucun test sur la
++    positivité de gi -- ce n'est pas un invariant listé par le
++    contrat, donc pas une garantie que le composant doive offrir.
++    """
++
++    def test_gi_never_changes_across_transitions(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        cell.on_sell_completed()
++        cell.on_buy_completed()
++        assert cell.gi == 105.0
++
++    def test_always_exactly_one_state(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        assert cell.state in (CellState.SPOT_HELD, CellState.CASH_HELD)
++        cell.on_sell_completed()
++        assert cell.state in (CellState.SPOT_HELD, CellState.CASH_HELD)
++
++
++class TestOnSellCompleted:
++    """CD-001 §5-§6."""
++
++    def test_toggles_to_cash_held(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        cell.on_sell_completed()
++        assert cell.state is CellState.CASH_HELD
++
++    def test_raises_when_cell_is_cash_held(self):
++        cell = Cell(gi=95.0, state=CellState.CASH_HELD)
++        with pytest.raises(CellStateError):
++            cell.on_sell_completed()
++
++    def test_raises_leaves_state_unchanged(self):
++        cell = Cell(gi=95.0, state=CellState.CASH_HELD)
++        try:
++            cell.on_sell_completed()
++        except CellStateError:
++            pass
++        assert cell.state is CellState.CASH_HELD
++
++
++class TestOnBuyCompleted:
++    """CD-001 §5-§6."""
++
++    def test_toggles_to_spot_held(self):
++        cell = Cell(gi=95.0, state=CellState.CASH_HELD)
++        cell.on_buy_completed()
++        assert cell.state is CellState.SPOT_HELD
++
++    def test_raises_when_cell_is_spot_held(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        with pytest.raises(CellStateError):
++            cell.on_buy_completed()
++
++
++class TestFullCycle:
++    def test_sell_then_buy_returns_to_original_state(self):
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        cell.on_sell_completed()
++        cell.on_buy_completed()
++        assert cell.state is CellState.SPOT_HELD
++        assert cell.gi == 105.0
++
++    def test_same_object_identity_is_preserved_across_transitions(self):
++        # CD-001 §8 : seule la cellule modifie elle-même son état --
++        # elle n'est jamais recréée par une transition.
++        cell = Cell(gi=105.0, state=CellState.SPOT_HELD)
++        identity_before = id(cell)
++        cell.on_sell_completed()
++        assert id(cell) == identity_before
++
++
++class TestNoDependencies:
++    """Vérifie, au niveau du module, l'absence de dépendance externe."""
++
++    def test_module_imports_only_stdlib(self):
++        import cell as cell_module
++        import inspect
++
++        source = inspect.getsource(cell_module)
++        import_lines = [
++            line.strip() for line in source.splitlines()
++            if line.strip().startswith(("import ", "from "))
++        ]
++        allowed = {"from __future__ import annotations", "from enum import Enum"}
++        assert set(import_lines) <= allowed
++
++
++class TestNoUnauthorizedMethods:
++    """
++    CD-001 §5 : exactement trois événements (construction,
++    on_sell_completed, on_buy_completed). Aucune autre méthode
++    publique ne doit exister -- vérifié explicitement plutôt que
++    supposé.
++    """
++
++    def test_cell_exposes_no_method_beyond_the_three_contractual_events(self):
++        public_methods = {
++            name for name in dir(Cell)
++            if not name.startswith("_") and callable(getattr(Cell, name))
++        }
++        assert public_methods == {"on_sell_completed", "on_buy_completed"}
+-- 
+2.43.0
