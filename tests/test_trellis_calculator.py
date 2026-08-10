@@ -12,10 +12,7 @@ Aucune référence à Cell, aux états patrimoniaux, ou au monde réel.
 """
 
 import math
-import sys
 import pytest
-
-sys.path.insert(0, "/home/claude")
 
 from trellis_calculator import (
     GridGeometry,
