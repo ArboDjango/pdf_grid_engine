@@ -167,8 +167,8 @@ def _side(value: str) -> str:
 class OkxSpotAdapter:
     """Adaptateur OKX SPOT sans état métier ni logique économique."""
 
-    REST_URL = "https://www.okx.com"
-    PRIVATE_WS_URL = "wss://ws.okx.com:8443/ws/v5/private"
+    REST_URL = "https://eea.okx.com"
+    PRIVATE_WS_URL = "wss://wseea.okx.com:8443/ws/v5/private"
 
     def __init__(
         self,
@@ -316,7 +316,9 @@ class OkxSpotAdapter:
     def _urllib_transport(self, method: str, path: str, params: Mapping[str, str] | None, body: Mapping[str, str] | None, headers: Mapping[str, str]) -> Mapping[str, Any]:
         query = f"?{urlencode(params)}" if params else ""
         data = json.dumps(body).encode() if body else None
-        request = Request(f"{self.REST_URL}{path}{query}", data=data, headers=dict(headers), method=method)
+        final_headers = {"User-Agent": "pdf_grid_engine/1.0"}
+        final_headers.update(headers)
+        request = Request(f"{self.REST_URL}{path}{query}", data=data, headers=final_headers, method=method)
         with urlopen(request, timeout=15) as response:  # nosec B310 - fixed HTTPS endpoint
             return json.loads(response.read().decode())
 
