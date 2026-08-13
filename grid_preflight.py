@@ -92,7 +92,10 @@ def run_preflight(source: OkxPreflightSource, config: PreflightConfig) -> Prefli
         raise PreflightError("P0 doit déjà respecter le tick size ; aucun arrondi silencieux de P0")
 
     raw_trellis = _calculate_trellis(config)
-    trellis = tuple(_round_down(level, instrument.tick_size) for level in raw_trellis)
+    trellis = tuple(
+        config.p0 if index == config.nl else _round_down(level, instrument.tick_size)
+        for index, level in enumerate(raw_trellis)
+    )
     _validate_final_trellis(trellis, config.p0, instrument.tick_size)
 
     total_capital = balances.quote_total + balances.base_total * config.p0

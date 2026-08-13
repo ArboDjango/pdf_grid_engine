@@ -66,6 +66,23 @@ class TestConstraintsAndEconomics:
         report = run_preflight(FakeSource(tick="0.1"), config())
         assert all(level % Decimal("0.1") == 0 for level in report.trellis)
 
+    def test_p0_remains_identifiable_after_tick_rounding(self):
+        p0 = Decimal("1.0071")
+        report = run_preflight(
+            FakeSource(tick="0.0001", lot="0.001", minimum="1"),
+            config(
+                gul=p0 * Decimal("1.15"),
+                gll=p0 * Decimal("0.85"),
+                nu=5,
+                nl=5,
+                p0=p0,
+                geometry=GridGeometry.EQUIDISTANT,
+            ),
+        )
+
+        assert report.trellis[5] == p0
+        assert p0 in report.trellis
+
     def test_trellis_collapsed_by_tick_is_rejected(self):
         with pytest.raises(PreflightError, match="strictement croissant"):
             run_preflight(FakeSource(tick="10"), config())
