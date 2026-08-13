@@ -240,6 +240,20 @@ class OkxSpotAdapter:
         accepted = item.get("sCode") == "0"
         return PlacementResult(accepted, item.get("ordId") or None, item.get("clOrdId", client_order_id), None if accepted else item.get("sCode"), None if accepted else item.get("sMsg"))
 
+    def place_market_buy(self, inst_id: str, quantity: Decimal, client_order_id: str) -> PlacementResult:
+        """Achat marketable, quantité exprimée en actif de base (tgtCcy=base_ccy).
+
+        Distinct des ordres de grille (jamais post_only) : réservé à
+        l'initialisation patrimoniale, où l'exécution immédiate est requise
+        pour débloquer le placement des SELL. La quantité passée doit
+        provenir de report.required_spot (grid_preflight), jamais recalculée
+        ici.
+        """
+        payload = {"instId": inst_id, "tdMode": "cash", "side": "buy", "ordType": "market", "sz": str(quantity), "tgtCcy": "base_ccy", "clOrdId": client_order_id}
+        item = self._one("POST", "/api/v5/trade/order", body=payload, allow_item_error=True)
+        accepted = item.get("sCode") == "0"
+        return PlacementResult(accepted, item.get("ordId") or None, item.get("clOrdId", client_order_id), None if accepted else item.get("sCode"), None if accepted else item.get("sMsg"))
+
     def list_open_orders(self, inst_id: str, client_order_id: str | None = None) -> tuple[OrderSnapshot, ...]:
         items = self._data("GET", "/api/v5/trade/orders-pending", {"instType": "SPOT", "instId": inst_id})
         orders = tuple(_order(item) for item in items)
