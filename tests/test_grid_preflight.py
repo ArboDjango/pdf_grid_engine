@@ -95,6 +95,11 @@ class TestConstraintsAndEconomics:
         report = run_preflight(FakeSource(maker="0.001"), config())
         assert all(cycle.profitable for cycle in report.cycles)
 
+    def test_negative_okx_maker_fee_is_treated_as_cost_magnitude(self):
+        positive = run_preflight(FakeSource(maker="0.002"), config())
+        negative = run_preflight(FakeSource(maker="-0.002"), config())
+        assert negative.cycles == positive.cycles
+
     def test_non_profitable_cycles_are_explicitly_reported(self):
         report = run_preflight(FakeSource(maker="0.1"), config())
         assert any(not cycle.profitable for cycle in report.cycles)

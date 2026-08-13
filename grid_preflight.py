@@ -109,7 +109,13 @@ def run_preflight(source: OkxPreflightSource, config: PreflightConfig) -> Prefli
     if instrument.min_notional is not None and q * trellis[0] < instrument.min_notional:
         raise PreflightError("Le niveau le plus bas ne satisfait pas min_notional")
 
-    cycles = tuple(_cycle_check(left, right, fees.maker, config.operational_margin) for left, right in zip(trellis, trellis[1:]))
+
+    maker_fee = abs(fees.maker)
+    cycles = tuple(
+        _cycle_check(left, right, maker_fee, config.operational_margin)
+        for left, right in zip(trellis, trellis[1:])
+    )
+
     cells = CellInstantiator().instantiate(tuple(float(level) for level in trellis), float(config.p0))
     orders = GridOrderProjection().project_initial(cells, float(q))
     required_spot = Decimal(config.nu) * q
