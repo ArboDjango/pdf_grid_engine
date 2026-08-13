@@ -128,6 +128,13 @@ class Fill:
     rebate_currency: str | None
 
 
+@dataclass(frozen=True)
+class Ticker:
+    inst_id: str
+    last: Decimal
+    ts: int
+
+
 def _decimal(value: Any, *, optional: bool = False) -> Decimal | None:
     if value in (None, ""):
         if optional:
@@ -208,6 +215,17 @@ class OkxSpotAdapter:
             base_total=_decimal(base.get("cashBal", "0")) or Decimal("0"),
             quote_total=_decimal(quote.get("cashBal", "0")) or Decimal("0"),
         )
+
+    def get_ticker(self, inst_id: str) -> Ticker:
+        """Lit le dernier prix négocié. Endpoint public OKX : aucune signature envoyée."""
+        response = self._transport("GET", "/api/v5/market/ticker", {"instId": inst_id}, None, {})
+        if response.get("code") != "0":
+            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}")
+        data = response.get("data", [])
+        if len(data) != 1:
+            raise OkxApiError(f"Réponse OKX : un élément attendu, {len(data)} reçu")
+        item = data[0]
+        return Ticker(inst_id=item.get("instId", inst_id), last=_required_decimal(item, "last"), ts=_required_timestamp(item, "ts"))
 
     def place_post_only_limit(self, inst_id: str, side: str, price: Decimal, quantity: Decimal, client_order_id: str) -> PlacementResult:
         payload = {"instId": inst_id, "tdMode": "cash", "side": _to_okx_side(side), "ordType": "post_only", "px": str(price), "sz": str(quantity), "clOrdId": client_order_id}
@@ -317,6 +335,13 @@ def _sign(secret: str, payload: str) -> str:
 def _required_decimal(item: Mapping[str, Any], key: str) -> Decimal:
     value = _decimal(item.get(key))
     assert value is not None
+    return value
+
+
+def _required_timestamp(item: Mapping[str, Any], key: str) -> int:
+    value = _timestamp(item.get(key))
+    if value is None:
+        raise OkxApiError(f"Horodatage OKX absent : {key!r}")
     return value
 
 
