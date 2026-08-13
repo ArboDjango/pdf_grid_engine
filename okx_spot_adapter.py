@@ -190,7 +190,14 @@ class OkxSpotAdapter:
         self._now = now or (lambda: datetime.now(timezone.utc))
 
     def get_instrument(self, inst_id: str) -> InstrumentRules:
-        item = self._one("GET", "/api/v5/account/instruments", {"instType": "SPOT", "instId": inst_id})
+        """Lit les caractéristiques de l'instrument. Endpoint public OKX : aucune signature envoyée."""
+        response = self._transport("GET", "/api/v5/public/instruments", {"instType": "SPOT", "instId": inst_id}, None, {})
+        if response.get("code") != "0":
+            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}")
+        data = response.get("data", [])
+        if len(data) != 1:
+            raise OkxApiError(f"Réponse OKX : un élément attendu, {len(data)} reçu")
+        item = data[0]
         return InstrumentRules(
             inst_id=item["instId"], base_ccy=item["baseCcy"], quote_ccy=item["quoteCcy"],
             tick_size=_required_decimal(item, "tickSz"), lot_size=_required_decimal(item, "lotSz"),

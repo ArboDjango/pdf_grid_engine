@@ -72,6 +72,11 @@ class TestUrllibTransportUserAgent:
         Cas _request() : headers contient OK-ACCESS-KEY, OK-ACCESS-SIGN, etc.
         Ces en-têtes doivent survivre intégralement à côté du User-Agent
         par défaut — la signature ne doit jamais être altérée ou perdue.
+
+        get_balances est utilisé ici comme exemple d'appel authentifié
+        (get_instrument est devenu un endpoint public depuis le correctif
+        account/instruments -> public/instruments, et ne passe plus par
+        _request — voir tests/test_get_instrument.py).
         """
         captured_requests = []
 
@@ -79,15 +84,15 @@ class TestUrllibTransportUserAgent:
             captured_requests.append(request)
             return FakeHttpResponse({
                 "code": "0", "msg": "",
-                "data": [{"instId": "XRP-USDT", "baseCcy": "XRP", "quoteCcy": "USDT",
-                          "tickSz": "0.0001", "lotSz": "0.1", "minSz": "0.1",
-                          "minNotional": None, "pxPrecision": "4", "szPrecision": "1",
-                          "state": "live"}],
+                "data": [{"details": [
+                    {"ccy": "XRP", "availBal": "10", "cashBal": "10"},
+                    {"ccy": "USDT", "availBal": "5", "cashBal": "5"},
+                ]}],
             })
 
         adapter = _adapter_using_default_transport()
         with patch("okx_spot_adapter.urlopen", fake_urlopen):
-            adapter.get_instrument("XRP-USDT")
+            adapter.get_balances("XRP", "USDT")
 
         assert len(captured_requests) == 1
         sent = captured_requests[0]
