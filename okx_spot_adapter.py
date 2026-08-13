@@ -135,6 +135,11 @@ class Ticker:
     ts: int
 
 
+@dataclass(frozen=True)
+class AccountConfig:
+    fee_type: str
+
+
 def _decimal(value: Any, *, optional: bool = False) -> Decimal | None:
     if value in (None, ""):
         if optional:
@@ -210,6 +215,13 @@ class OkxSpotAdapter:
         item = self._one("GET", "/api/v5/account/trade-fee", {"instType": "SPOT", "instId": inst_id})
         group = item.get("feeGroup", [{}])[0]
         return FeeRates(inst_id=inst_id, maker=_required_decimal(group, "maker"), taker=_required_decimal(group, "taker"))
+
+    def get_account_config(self) -> AccountConfig:
+        """Précondition de lancement : feeType doit valoir "1" (frais Spot BUY
+        payés en devise de cotation) avant tout achat MARKET. Lecture pure,
+        aucun appel à set-fee-type n'est jamais effectué par ce module."""
+        item = self._one("GET", "/api/v5/account/config")
+        return AccountConfig(fee_type=item["feeType"])
 
     def get_balances(self, base_ccy: str, quote_ccy: str) -> Balances:
         item = self._one("GET", "/api/v5/account/balance", {"ccy": f"{base_ccy},{quote_ccy}"})
