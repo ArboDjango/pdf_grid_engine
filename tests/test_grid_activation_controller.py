@@ -171,7 +171,7 @@ class TestGridActivationPhase1Sondage:
         Aucun ordre ouvert, aucun trouvé par get_order : tous les niveaux
         sont placés via place_post_only_limit => ACTIVE.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         result = GridActivationController().run(adapter, report)
@@ -186,7 +186,7 @@ class TestGridActivationPhase1Sondage:
         ordre ouvert (identifiants dérivés présents dans list_open_orders),
         aucun niveau ne reste "remaining" => ACTIVE, sans aucun placement.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         # Construit les identifiants attendus pour CHAQUE niveau de la
@@ -205,7 +205,7 @@ class TestGridActivationPhase1Sondage:
 
     def test_single_list_open_orders_call_regardless_of_n(self):
         """Contrôle du coût réseau : un seul appel list_open_orders, quel que soit n."""
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         calls = []
@@ -221,7 +221,7 @@ class TestGridActivationPhase1Sondage:
         Une erreur lors du sondage (OkxApiError) doit produire ERROR,
         jamais une interprétation silencieuse comme "aucun ordre ouvert".
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         adapter.open_orders_error = OkxApiError("panne temporaire")
         report = run_preflight(adapter, grid_config())
 
@@ -238,7 +238,7 @@ class TestGridActivationPhase2VerificationCiblee:
         la phase 1) doit être retrouvé par get_order en phase 2 et classé
         already_filled — jamais retenté au placement.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -257,7 +257,7 @@ class TestGridActivationPhase2VerificationCiblee:
         => placé via place_post_only_limit, résultat ACTIVE (acceptation
         par défaut du FakeAdapter).
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         # Aucun get_order_results renseigné => OkxApiError par défaut pour tous.
 
@@ -273,7 +273,7 @@ class TestGridActivationPhase2VerificationCiblee:
         phase 1 mais trouvé en phase 2 est traité comme déjà ouvert,
         jamais replacé.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -288,7 +288,7 @@ class TestGridActivationPhase2VerificationCiblee:
 
     def test_canceled_order_found_in_phase2_treated_as_needing_placement(self):
         """Un ordre annulé/expiré doit être considéré comme à replacer, jamais comme satisfait."""
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -311,7 +311,7 @@ class TestGridActivationPhase2VerificationCiblee:
         immédiatement le traitement des niveaux restants — jamais être
         interprétée comme "ordre absent", jamais continuer aveuglément.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -328,7 +328,7 @@ class TestGridActivationPhase2VerificationCiblee:
         Après une panne réelle sur un niveau, aucun niveau suivant ne doit
         être traité — vérifié en comptant les appels get_order.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         assert len(report.orders) >= 2  # précondition du test
 
@@ -348,7 +348,7 @@ class TestGridActivationPhase2VerificationCiblee:
 
 class TestGridActivationPhase3Placement:
     def test_all_absent_levels_get_placed_when_accepted(self):
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         result = GridActivationController().run(adapter, report)
@@ -359,7 +359,7 @@ class TestGridActivationPhase3Placement:
         assert len(adapter.placed_orders) == len(report.orders)
 
     def test_placement_uses_derived_id_per_level(self):
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         GridActivationController().run(adapter, report)
@@ -372,7 +372,7 @@ class TestGridActivationPhase3Placement:
         assert used_ids == expected_ids
 
     def test_placement_uses_side_price_quantity_from_order_instruction(self):
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         GridActivationController().run(adapter, report)
@@ -387,7 +387,7 @@ class TestGridActivationPhase3Placement:
         ERROR — la distinction entre rejet métier et panne réelle est
         stricte (voir phase 2 pour la panne réelle).
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -406,7 +406,7 @@ class TestGridActivationPhase3Placement:
         Un seul niveau rejeté parmi n acceptés : les n-1 autres restent
         placés (pas de rollback), comptabilisés dans placed.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         assert len(report.orders) >= 2
 
@@ -425,7 +425,7 @@ class TestGridActivationPhase3Placement:
         appel place_post_only_limit par niveau rejeté, jamais de second
         essai ni de bascule vers un autre type d'ordre.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         first_side, first_price, _ = report.orders[0]
@@ -443,7 +443,7 @@ class TestGridActivationPhase3Placement:
         avant que list_open_orders ET tous les get_order ciblés soient
         terminés — vérifié via un ordre d'appels global.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
         call_order = []
@@ -473,7 +473,7 @@ class TestGridActivationRealTransportFailures:
         réseau réelle (pas OkxApiError) pendant list_open_orders doit
         produire ERROR, jamais se propager comme exception non gérée.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         adapter.open_orders_error = ConnectionError("panne réseau réelle en phase 1")
 
@@ -489,7 +489,7 @@ class TestGridActivationRealTransportFailures:
         ERROR tout en préservant dans le résultat ce qui a réellement été
         accompli avant l'échec — pas une perte silencieuse d'information.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         assert len(report.orders) >= 2
 
@@ -513,7 +513,7 @@ class TestGridActivationRealTransportFailures:
 
     def test_phase3_stops_immediately_no_further_placement_attempted(self):
         """Après la panne, aucun niveau suivant ne doit être tenté."""
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         assert len(report.orders) >= 2
 
@@ -551,7 +551,7 @@ class TestGridActivationRecoveryAfterPartial:
         => ACTIVE. Convergence par idempotence, sans logique de reprise
         spécifique — exactement la propriété visée par l'architecture.
         """
-        adapter = FakeAdapter(base="0", quote="1000")
+        adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         assert len(report.orders) >= 2
 
@@ -601,3 +601,77 @@ class TestGridActivationRecoveryAfterPartial:
         # Un seul appel réseau de placement au second passage : le niveau
         # manquant, jamais les n-1 déjà ouverts.
         assert len(adapter.placed_orders) == 1
+
+
+class TestGridActivationRefusesWhenSpotNotCovered:
+    """
+    Garde-fou intrinsèque : report.spot_covered=False doit produire ERROR
+    avant tout appel réseau — aucune dépendance à un appelant externe
+    (GridTradingController) pour que cette garantie soit vraie.
+    """
+
+    def test_spot_not_covered_produces_error_state(self):
+        adapter = FakeAdapter(base="0", quote="1000")
+        report = run_preflight(adapter, grid_config())
+        assert report.spot_covered is False  # précondition du test
+
+        result = GridActivationController().run(adapter, report)
+
+        assert result.state == GridActivationState.ERROR
+
+    def test_spot_not_covered_never_calls_list_open_orders(self):
+        adapter = FakeAdapter(base="0", quote="1000")
+        report = run_preflight(adapter, grid_config())
+
+        calls = []
+        adapter.list_open_orders = lambda *a, **k: calls.append(("list_open_orders", a, k))
+
+        GridActivationController().run(adapter, report)
+
+        assert calls == []
+
+    def test_spot_not_covered_never_calls_get_order(self):
+        adapter = FakeAdapter(base="0", quote="1000")
+        report = run_preflight(adapter, grid_config())
+
+        calls = []
+        adapter.get_order = lambda *a, **k: calls.append(("get_order", a, k))
+
+        GridActivationController().run(adapter, report)
+
+        assert calls == []
+
+    def test_spot_not_covered_never_calls_place_post_only_limit(self):
+        adapter = FakeAdapter(base="0", quote="1000")
+        report = run_preflight(adapter, grid_config())
+
+        calls = []
+        adapter.place_post_only_limit = lambda *a, **k: calls.append(("place_post_only_limit", a, k))
+
+        GridActivationController().run(adapter, report)
+
+        assert calls == []
+        assert adapter.placed_orders == []
+
+    def test_error_message_mentions_spot_covered_false(self):
+        adapter = FakeAdapter(base="0", quote="1000")
+        report = run_preflight(adapter, grid_config())
+
+        result = GridActivationController().run(adapter, report)
+
+        assert "spot_covered=False" in result.detail
+
+    def test_spot_covered_true_preserves_existing_behavior(self):
+        """
+        spot_covered=True doit conserver exactement le comportement
+        antérieur au patch : le garde-fou ne doit jamais interférer
+        lorsque la condition est satisfaite.
+        """
+        adapter = FakeAdapter(base="1000", quote="1000")
+        report = run_preflight(adapter, grid_config())
+        assert report.spot_covered is True  # précondition du test
+
+        result = GridActivationController().run(adapter, report)
+
+        assert result.state == GridActivationState.ACTIVE
+        assert len(result.placed) == len(report.orders)

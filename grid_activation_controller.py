@@ -5,6 +5,11 @@ grid_preflight.run_preflight) en ordres réels sur l'exchange, de façon
 idempotente : un redémarrage avec la même configuration ne replace jamais
 un niveau déjà ouvert ou déjà exécuté.
 
+Garde-fou intrinsèque : run() refuse toute activation si
+report.spot_covered est False, avant tout appel réseau — cette garantie
+ne dépend d'aucun appelant externe (elle vaut même en cas d'appel direct
+à GridActivationController, hors de GridTradingController).
+
 Contrat explicite : activation d'une configuration donnée uniquement.
 GridActivationController ne détecte ni ne gère un changement de
 configuration entre deux appels (P0, bornes, nu/nl, alpha, tick_size,
@@ -119,7 +124,20 @@ class GridActivationController:
         explicite au placement (phase 3, accepted=False) ne déclenche
         jamais de nouvelle tentative avec un autre type d'ordre : il est
         comptabilisé dans failed, et l'état final est PARTIAL.
+
+        Garde-fou intrinsèque : si report.spot_covered est False, aucun
+        appel réseau n'est effectué (ni sondage, ni vérification, ni
+        placement) — ERROR immédiat. Cette vérification ne dépend
+        d'aucun appelant externe (ex. GridTradingController) : elle est
+        vraie quel que soit le point d'entrée utilisé pour appeler run().
         """
+        if not report.spot_covered:
+            return GridActivationResult(
+                GridActivationState.ERROR, (), (), (), (),
+                "activation refusée : report.spot_covered=False — "
+                "le spot requis pour les niveaux SELL n'est pas disponible",
+            )
+
         config = report.config
         instrument = report.instrument
 
