@@ -429,8 +429,22 @@ def _to_okx_side(side: str) -> str:
     raise ValueError(f"Côté moteur inconnu : {side!r}")
 
 
+def _order_price(item: Mapping[str, Any]) -> Decimal:
+    """Prix de l'ordre. Pour un ordre LIMIT, px est toujours renseigné et
+    prime. Pour un ordre MARKET, OKX renvoie px="" (aucun prix limite
+    n'a de sens) et renseigne à la place avgPx (prix moyen d'exécution).
+    Ce repli ne concerne que la lecture d'un ordre déjà passé (get_order,
+    list_open_orders, listen_orders) — il n'affecte jamais la construction
+    des ordres de grille (toujours LIMIT, px toujours fourni par
+    place_post_only_limit) ni place_market_buy (qui n'envoie jamais px)."""
+    px = item.get("px")
+    if px not in (None, ""):
+        return _required_decimal(item, "px")
+    return _required_decimal(item, "avgPx")
+
+
 def _order(item: Mapping[str, Any]) -> OrderSnapshot:
-    return OrderSnapshot(item["ordId"], item.get("clOrdId", ""), item["instId"], _side(item["side"]), _required_decimal(item, "px"), _required_decimal(item, "sz"), _required_decimal(item, "accFillSz"), item["state"], item["ordType"], _timestamp(item.get("cTime")), _timestamp(item.get("uTime")))
+    return OrderSnapshot(item["ordId"], item.get("clOrdId", ""), item["instId"], _side(item["side"]), _order_price(item), _required_decimal(item, "sz"), _required_decimal(item, "accFillSz"), item["state"], item["ordType"], _timestamp(item.get("cTime")), _timestamp(item.get("uTime")))
 
 
 def _fill(item: Mapping[str, Any]) -> Fill:
