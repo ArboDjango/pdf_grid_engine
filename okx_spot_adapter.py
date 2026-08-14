@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Awaitable, Callable, Mapping, Protocol, Sequence
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -352,8 +353,16 @@ class OkxSpotAdapter:
         final_headers = {"User-Agent": "pdf_grid_engine/1.0"}
         final_headers.update(headers)
         request = Request(f"{self.REST_URL}{path}{query}", data=data, headers=final_headers, method=method)
-        with urlopen(request, timeout=15) as response:  # nosec B310 - fixed HTTPS endpoint
-            return json.loads(response.read().decode())
+        try:
+            with urlopen(request, timeout=15) as response:  # nosec B310 - fixed HTTPS endpoint
+                return json.loads(response.read().decode())
+        except HTTPError as error:
+            # OKX répond parfois avec un statut HTTP d'erreur (400/401/403/...)
+            # au lieu de HTTP 200 + code OKX en erreur. Dans les deux cas, le
+            # résultat doit rester une enveloppe exploitable par les
+            # vérifications déjà en place (_request, get_ticker,
+            # get_instrument), jamais une HTTPError brute.
+            return _okx_error_envelope(error)
 
     async def _default_websocket_factory(self, url: str) -> WebSocketConnection:
         try:
@@ -365,6 +374,34 @@ class OkxSpotAdapter:
 
 def _sign(secret: str, payload: str) -> str:
     return base64.b64encode(hmac.new(secret.encode(), payload.encode(), hashlib.sha256).digest()).decode()
+
+
+def _okx_error_envelope(error: HTTPError) -> Mapping[str, Any]:
+    """Convertit une HTTPError (400/401/403/500/...) en enveloppe au format
+    OKX ({"code", "msg", "data"}), exploitable telle quelle par les
+    vérifications déjà en place (_request, get_ticker, get_instrument), qui
+    font toutes `if response.get("code") != "0": raise OkxApiError(...)`.
+
+    Si le corps de la réponse est un JSON OKX exploitable (contient "code"),
+    il est retourné tel quel — le message d'erreur final reprend alors
+    exactement le code/msg réel d'OKX. Sinon, une enveloppe de repli est
+    construite avec le seul statut HTTP, sans jamais exposer les en-têtes
+    de la requête (donc jamais de clé API, secret ou passphrase, qui n'y
+    figurent jamais).
+    """
+    try:
+        raw = error.read()
+    except Exception:
+        raw = b""
+    parsed: Any = None
+    if raw:
+        try:
+            parsed = json.loads(raw.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed = None
+    if isinstance(parsed, Mapping) and "code" in parsed:
+        return parsed
+    return {"code": str(error.code), "msg": f"HTTP {error.code} sans corps JSON OKX exploitable", "data": []}
 
 
 def _required_decimal(item: Mapping[str, Any], key: str) -> Decimal:
