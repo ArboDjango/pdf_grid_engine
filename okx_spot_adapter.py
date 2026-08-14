@@ -349,7 +349,7 @@ class OkxSpotAdapter:
 
     def _urllib_transport(self, method: str, path: str, params: Mapping[str, str] | None, body: Mapping[str, str] | None, headers: Mapping[str, str]) -> Mapping[str, Any]:
         query = f"?{urlencode(params)}" if params else ""
-        data = json.dumps(body).encode() if body else None
+        data = json.dumps(body, separators=(",", ":")).encode() if body else None
         final_headers = {"User-Agent": "pdf_grid_engine/1.0"}
         final_headers.update(headers)
         request = Request(f"{self.REST_URL}{path}{query}", data=data, headers=final_headers, method=method)
