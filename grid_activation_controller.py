@@ -101,7 +101,12 @@ class GridActivationController:
     docstring de module.
     """
 
-    def run(self, adapter, report: PreflightReport) -> GridActivationResult:
+    def run(
+        self,
+        adapter,
+        report: PreflightReport,
+        order_ids: dict[OrderInstruction, str] | None = None,
+    ) -> GridActivationResult:
         """Sonde, vérifie, puis place les niveaux manquants.
 
         Phase 1 : un seul appel list_open_orders(inst_id) — niveaux déjà
@@ -159,7 +164,18 @@ class GridActivationController:
         after_phase1: list[tuple[OrderInstruction, str]] = []  # (instruction, derived_id)
         for instruction in report.orders:
             side, price, quantity = instruction
-            derived_id = derive_grid_order_id(config, instrument.tick_size, instrument.lot_size, side, price)
+
+            if order_ids is not None and instruction in order_ids:
+                derived_id = order_ids[instruction]
+            else:
+                derived_id = derive_grid_order_id(
+                    config,
+                    instrument.tick_size,
+                    instrument.lot_size,
+                    side,
+                    price,
+                )
+
             if derived_id in open_ids:
                 already_open.append(instruction)
             else:
