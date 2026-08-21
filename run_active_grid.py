@@ -177,6 +177,10 @@ def print_grid_identity(config: PreflightConfig, instrument) -> None:
     print(f"spacing_h_pct      : {config.spacing_h_pct}")
     print(f"alpha              : {config.alpha}")
     print(f"operational_margin : {config.operational_margin}")
+    if config.allocated_capital is not None:
+        print(f"allocated_capital  : {config.allocated_capital} {instrument.quote_ccy}")
+    if config.q is not None:
+        print(f"q                  : {config.q}")
     print(f"tick_size          : {instrument.tick_size}")
     print(f"lot_size           : {instrument.lot_size}")
     print(f"id(config)         : {id(config)}  (référence à surveiller — ne doit jamais changer)")

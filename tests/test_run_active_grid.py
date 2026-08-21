@@ -28,7 +28,7 @@ from okx_spot_adapter import (
     OrderSnapshot,
     PlacementResult,
 )
-from run_active_grid import GridAllocatedCapitalNotFrozen, run
+from run_active_grid import GridAllocatedCapitalNotFrozen, print_grid_identity, run
 from trellis_calculator import GridGeometry
 
 
@@ -294,6 +294,42 @@ class TestRealCaseBuyFilledSellLive:
         run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
 
         assert id(config) == config_id_before  # jamais recalculé, cause éliminée par ce chantier
+
+
+class TestPrintGridIdentityShowsAllocatedCapitalAndQ:
+    """print_grid_identity() affiche explicitement allocated_capital et q
+    lorsqu'ils sont présents -- affichage seul, aucune logique touchée."""
+
+    def test_shows_allocated_capital_and_q_when_present(self, capsys):
+        config = grid_config(allocated_capital=Decimal("200"), q=Decimal("20.280"))
+        instrument = InstrumentRules("XRP-USDC", "XRP", "USDC", Decimal("0.0001"), Decimal("0.001"), Decimal("0.1"), None, 4, 1, "live")
+
+        print_grid_identity(config, instrument)
+
+        output = capsys.readouterr().out
+        assert "allocated_capital  : 200 USDC" in output
+        assert "q                  : 20.280" in output
+
+    def test_omits_both_lines_when_absent(self, capsys):
+        config = grid_config(allocated_capital=None, q=None)
+        instrument = InstrumentRules("XRP-USDC", "XRP", "USDC", Decimal("0.0001"), Decimal("0.001"), Decimal("0.1"), None, 4, 1, "live")
+
+        print_grid_identity(config, instrument)
+
+        lines = capsys.readouterr().out.splitlines()
+        assert not any(line.startswith("allocated_capital") for line in lines)
+        assert not any(line.startswith("q ") for line in lines)
+
+    def test_does_not_alter_other_existing_lines(self, capsys):
+        config = grid_config(allocated_capital=Decimal("200"), q=Decimal("20.280"))
+        instrument = InstrumentRules("XRP-USDC", "XRP", "USDC", Decimal("0.0001"), Decimal("0.001"), Decimal("0.1"), None, 4, 1, "live")
+
+        print_grid_identity(config, instrument)
+
+        output = capsys.readouterr().out
+        assert f"P0                 : {config.p0}" in output
+        assert f"tick_size          : {instrument.tick_size}" in output
+        assert f"id(config)         : {id(config)}" in output
 
 
 class TestAllocatedCapitalNotFrozenRefused:
