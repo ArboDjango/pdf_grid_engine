@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import tempfile
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -125,11 +126,12 @@ def _bound_run(monkeypatch, max_cycles=1):
     monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original(adapter, config, max_cycles=max_cycles, sleep_fn=lambda s: None))
 
 
-def _write_valid_state(path, *, p0="1.0013", gll="0.951235", gul="1.0563715"):
+def _write_valid_state(path, *, p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044"):
     payload = {
         "inst_id": "XRP-USDC", "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
         "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
         "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
+        "q": q,
     }
     with open(path, "w") as f:
         json.dump(payload, f)
@@ -203,6 +205,43 @@ class TestMultipleRestartsPreserveConfig:
         assert config.p0 == Decimal("1.0013")
         assert config.gll == Decimal("0.951235")
         assert config.gul == Decimal("1.0563715")
+
+
+# ---------------------------------------------------------------------------
+# 4b — q figé à la création puis persisté avec P0/GLL/GUL/nu/nl
+# ---------------------------------------------------------------------------
+
+class TestQFrozenAtCreation:
+    def test_new_grid_freezes_and_persists_q(self, fake_adapter, monkeypatch, state_path):
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        assert exit_code == 0
+        with open(state_path) as f:
+            payload = json.load(f)
+        assert "q" in payload
+        loaded = run_active_grid.load_grid_state(state_path)
+        assert loaded.q is not None
+        assert loaded.q > 0
+
+
+# ---------------------------------------------------------------------------
+# 4c — reprise : q chargé depuis le state, jamais recalculé
+# ---------------------------------------------------------------------------
+
+class TestQLoadedNotRecalculatedOnResume:
+    def test_resume_loads_persisted_q_ignoring_current_balances(self, fake_adapter, monkeypatch, state_path):
+        _write_valid_state(state_path, q="7.5")
+        # Soldes actuels sans rapport avec le q historique -- q ne doit
+        # jamais être redérivé depuis eux à la reprise.
+        fake_adapter.balances = Balances(Decimal("999999"), Decimal("999999"), Decimal("999999"), Decimal("999999"))
+        _bound_run(monkeypatch)
+
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        loaded = run_active_grid.load_grid_state(state_path)
+        assert loaded.q == Decimal("7.5")
 
 
 # ---------------------------------------------------------------------------
@@ -339,20 +378,28 @@ class TestCorruptedStateFile:
 # 9 — écriture atomique
 # ---------------------------------------------------------------------------
 
+def _historical_config_with_q(fake_adapter, inst_id, q="21.044"):
+    """build_historical_config() ne fige jamais q (chemin --mode resume,
+    déjà noté comme non utilisé en production H24) -- ces tests de
+    persistance ont seulement besoin d'un PreflightConfig quelconque déjà
+    valide, avec q figé comme l'exige désormais save_grid_state."""
+    return replace(run_active_grid.build_historical_config(fake_adapter, inst_id), q=Decimal(q))
+
+
 class TestAtomicWrite:
-    def test_9_state_file_contains_exact_twelve_fields(self, fake_adapter, state_path):
+    def test_9_state_file_contains_exact_thirteen_fields(self, fake_adapter, state_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
-        config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        config = _historical_config_with_q(fake_adapter, "XRP-USDC")
 
         run_active_grid.save_grid_state(config, instrument, state_path)
 
         with open(state_path) as f:
             payload = json.load(f)
-        assert set(payload.keys()) == set(run_active_grid._REQUIRED_STATE_FIELDS)
+        assert set(payload.keys()) == set(run_active_grid._REQUIRED_STATE_FIELDS) | {"q"}
 
     def test_9_decimals_serialized_as_strings(self, fake_adapter, state_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
-        config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        config = _historical_config_with_q(fake_adapter, "XRP-USDC")
 
         run_active_grid.save_grid_state(config, instrument, state_path)
 
@@ -361,10 +408,11 @@ class TestAtomicWrite:
         assert isinstance(payload["p0"], str)
         assert isinstance(payload["gll"], str)
         assert isinstance(payload["gul"], str)
+        assert isinstance(payload["q"], str)
 
     def test_9_no_temp_file_left_behind_after_successful_write(self, fake_adapter, state_path, tmp_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
-        config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        config = _historical_config_with_q(fake_adapter, "XRP-USDC")
 
         run_active_grid.save_grid_state(config, instrument, state_path)
 
@@ -373,7 +421,7 @@ class TestAtomicWrite:
 
     def test_9_reload_produces_identical_config(self, fake_adapter, state_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
-        original_config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        original_config = _historical_config_with_q(fake_adapter, "XRP-USDC")
 
         run_active_grid.save_grid_state(original_config, instrument, state_path)
         reloaded = run_active_grid.load_grid_state(state_path)
@@ -387,6 +435,7 @@ class TestAtomicWrite:
         assert reloaded.spacing_h_pct == original_config.spacing_h_pct
         assert reloaded.alpha == original_config.alpha
         assert reloaded.operational_margin == original_config.operational_margin
+        assert reloaded.q == original_config.q
 
     def test_9_write_uses_os_replace_not_direct_write(self):
         import inspect
@@ -411,16 +460,53 @@ class TestAtomicWrite:
 
 class TestRunUnchanged:
     def test_10_run_function_unchanged(self):
-        """Empreinte mise à jour délibérément (chantier observabilité) :
-        run() journalise désormais le résultat non-ACTIVE de
-        run_exposure_cycle() -- seule addition, aucune logique de trading
+        """Empreinte mise à jour délibérément (chantier q-immuable) :
+        run() refuse désormais explicitement de démarrer si config.q est
+        None (GridQNotFrozen) -- seule addition de logique, aucune autre
         touchée (vérifié ci-dessous : ni market_reader ni load_grid_state
         n'apparaissent, exactement comme avant)."""
         import hashlib
         import inspect
         source = inspect.getsource(run_active_grid.run)
         digest = hashlib.md5(source.encode()).hexdigest()
-        assert digest == "fb9ec05bbca95aeeadaeba41937ba29b"
+        assert digest == "8006bb4314d8814665bc7d8a5bb3db14"
         assert "market_reader" not in source
         assert "load_grid_state" not in source
         assert "save_grid_state" not in source
+
+
+# ---------------------------------------------------------------------------
+# 11 — grille legacy sans q : reprise refusée explicitement, jamais de
+# migration automatique ni de création silencieuse par-dessus
+# ---------------------------------------------------------------------------
+
+def _write_legacy_state_without_q(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715"):
+    """Reproduit exactement un fichier de grille antérieur à ce chantier :
+    les 12 champs historiques, structurellement valide, mais sans q."""
+    payload = {
+        "inst_id": inst_id, "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
+        "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
+        "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f)
+
+
+class TestLegacyStateWithoutQRefused:
+    def test_load_grid_state_raises_legacy_error(self, state_path):
+        _write_legacy_state_without_q(state_path)
+
+        with pytest.raises(run_active_grid.LegacyGridStateWithoutQ):
+            run_active_grid.load_grid_state(state_path)
+
+    def test_run_auto_mode_refuses_without_creating_new_grid(self, fake_adapter, monkeypatch, state_path):
+        _write_legacy_state_without_q(state_path)
+
+        optimizer_calls = []
+        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda *a, **k: optimizer_calls.append(1))
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        assert exit_code == 1
+        assert optimizer_calls == []  # jamais de création silencieuse par-dessus une grille legacy

@@ -6,6 +6,7 @@ appelées de manière imprévue.
 """
 
 import sys
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -300,7 +301,9 @@ class TestNoRebuildNoInitialActivation:
 
 class TestConfigAndTrellisInvariance:
     def test_g_two_successive_run_preflight_use_exact_same_config(self, fake_adapter):
-        config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        # build_historical_config() ne fige jamais q (--mode resume, non
+        # utilisé en production H24) -- run() l'exige désormais figé.
+        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"))
         config_id = id(config)
 
         run_active_grid.run(fake_adapter, config, max_cycles=2, sleep_fn=lambda s: None)
@@ -325,7 +328,10 @@ class TestRealScenarioTieBreak:
         désormais son propre SELL -- remplace l'ancienne assertion
         new_sells == [] qui affirmait le comportement inverse (starvation
         du cycle par le tie-break)."""
-        config = run_active_grid.build_historical_config(fake_adapter, "XRP-USDC")
+        # build_historical_config() ne fige jamais q (--mode resume, non
+        # utilisé en production H24) -- run() l'exige désormais figé ;
+        # 21.044 correspond à la quantité historique réelle de ce scénario.
+        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"))
         report = run_preflight(fake_adapter, config)
 
         lower_levels = sorted(float(g) for g in report.trellis if float(g) < float(config.p0))

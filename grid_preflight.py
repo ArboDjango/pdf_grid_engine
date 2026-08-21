@@ -39,6 +39,12 @@ class PreflightConfig:
     spacing_h_pct: Decimal
     alpha: Decimal
     operational_margin: Decimal
+    # Identité économique immuable de la grille, au même niveau que P0/GLL/
+    # GUL/nu/nl. None : pas encore figé (config de création, avant le premier
+    # run_preflight). Une fois figé, run_preflight ne le recalcule plus jamais
+    # à partir des soldes courants -- l'appelant (run_active_grid.py) est seul
+    # responsable de figer cette valeur avant toute persistance ou boucle.
+    q: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -103,7 +109,18 @@ def run_preflight(source: OkxPreflightSource, config: PreflightConfig) -> Prefli
     lower_levels = trellis[:config.nl]
     denominator = Decimal(config.nu) * config.p0 + sum(lower_levels, Decimal("0"))
     q_raw = allocated_capital / denominator
-    q = _round_down(q_raw, instrument.lot_size)
+    if config.q is None:
+        # Création : q n'a encore jamais été figé pour cette grille --
+        # calculé une seule fois ici, à partir du patrimoine disponible
+        # MAINTENANT. L'appelant (build_optimized_config) est responsable de
+        # figer cette valeur dans un nouveau PreflightConfig avant toute
+        # activation ou persistance.
+        q = _round_down(q_raw, instrument.lot_size)
+    else:
+        # Grille déjà identifiée : q fait partie de son identité économique
+        # immuable, au même titre que P0/GLL/GUL/nu/nl -- jamais recalculé,
+        # quelle que soit l'évolution des soldes réels.
+        q = config.q
     if q < instrument.min_size:
         raise PreflightError(f"q={q} est inférieur à min_size={instrument.min_size}")
     if instrument.min_notional is not None and q * trellis[0] < instrument.min_notional:
@@ -155,6 +172,8 @@ def _validate_config(config: PreflightConfig) -> None:
         raise PreflightError("alpha doit appartenir à [0, 1]")
     if config.operational_margin < Decimal("0"):
         raise PreflightError("operational_margin doit être positif ou nul")
+    if config.q is not None and config.q <= Decimal("0"):
+        raise PreflightError("q figé doit être strictement positif")
 
 
 def _validate_final_trellis(trellis: tuple[Decimal, ...], p0: Decimal, tick_size: Decimal) -> None:

@@ -96,6 +96,10 @@ def grid_config(**changes):
         inst_id="XRP-USDC", gul=Decimal("1.0563715"), gll=Decimal("0.951235"), nu=5, nl=5,
         p0=Decimal("1.0013"), geometry=GridGeometry.FLEXIBLE,
         spacing_h_pct=Decimal("0.0008"), alpha=Decimal("0.95"), operational_margin=Decimal("0.50"),
+        # q figé par défaut -- run() l'exige désormais (identité immuable de
+        # la grille) ; 21.044 correspond à la quantité historique réelle
+        # utilisée par les scénarios de fill/ordre déjà ouvert de ce fichier.
+        q=Decimal("21.044"),
     )
     values.update(changes)
     return PreflightConfig(**values)
@@ -143,10 +147,19 @@ class TestTrellisInvariance:
         assert report1.trellis == report2.trellis == report3.trellis
 
 
-class TestDynamicPatrimonyStaticTrellis:
-    """TEST 3 — patrimoine dynamique, treillis invariant."""
+class TestDynamicPatrimonyStaticTrellisAndQ:
+    """TEST 3 — patrimoine dynamique, treillis ET q invariants.
 
-    def test_q_can_change_but_trellis_cannot(self):
+    RÉVISÉ par le chantier q-immuable : q fait désormais partie de
+    l'identité économique de la grille (config.q), au même titre que le
+    treillis (P0/GLL/GUL/nu/nl) -- une variation des soldes OKX entre deux
+    cycles ne doit JAMAIS le modifier. Remplace l'ancienne assertion
+    `report_before.q != report_after.q` qui affirmait exactement le
+    comportement inverse (q recalculé à chaque cycle depuis les soldes
+    courants) -- c'est précisément le défaut que ce chantier corrige.
+    """
+
+    def test_q_and_trellis_both_survive_balance_variation(self):
         adapter = FakeAdapter(base="20000", quote="20000")
         config = grid_config()
 
@@ -155,8 +168,32 @@ class TestDynamicPatrimonyStaticTrellis:
         adapter.balances = Balances(Decimal("5000"), Decimal("5000"), Decimal("5000"), Decimal("5000"))
         report_after = run_preflight(adapter, config)
 
-        assert report_before.q != report_after.q  # patrimoine, dynamique
+        assert report_before.q == report_after.q == config.q  # q, figé
         assert report_before.trellis == report_after.trellis  # treillis, invariant
+
+    def test_materialized_qty_immutable_across_cycles_despite_balance_drift(self):
+        """Test obligatoire bout-en-bout : une variation des soldes OKX
+        entre deux cycles de run() ne doit jamais changer la quantité
+        réellement matérialisée dans les ordres placés."""
+        adapter = FakeAdapter(base="20000", quote="20000")
+        config = grid_config()
+
+        balance_changes = iter([
+            Balances(Decimal("5000"), Decimal("5000"), Decimal("5000"), Decimal("5000")),
+            Balances(Decimal("50000"), Decimal("50000"), Decimal("50000"), Decimal("50000")),
+        ])
+
+        def drift_balances(_seconds):
+            try:
+                adapter.balances = next(balance_changes)
+            except StopIteration:
+                pass
+
+        run(adapter, config, max_cycles=3, sleep_fn=drift_balances)
+
+        assert adapter.placed_orders  # au moins un ordre matérialisé sur les 3 cycles
+        placed_quantities = {qty for _, _, _, qty, _ in adapter.placed_orders}
+        assert placed_quantities == {config.q}  # jamais autre chose que le q figé
 
 
 class TestRealCaseBuyFilledSellLive:

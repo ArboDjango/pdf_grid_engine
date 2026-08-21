@@ -121,12 +121,13 @@ def _bound_run(monkeypatch, max_cycles=1):
     monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original(adapter, config, max_cycles=max_cycles, sleep_fn=lambda s: None))
 
 
-def _write_valid_state(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715"):
+def _write_valid_state(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044"):
     import json
     payload = {
         "inst_id": inst_id, "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
         "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
         "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
+        "q": q,
     }
     with open(path, "w") as f:
         json.dump(payload, f)
@@ -269,12 +270,12 @@ class TestRunUnchanged:
     def test_8_run_source_hash_unchanged(self):
         """Empreinte mise à jour délibérément -- voir
         test_run_active_grid_auto_mode.py::TestRunUnchanged pour la
-        justification complète (chantier observabilité, aucune logique
-        de trading touchée)."""
+        justification complète (chantier q-immuable, garde GridQNotFrozen
+        ajoutée, aucune autre logique touchée)."""
         import hashlib
         import inspect
         digest = hashlib.md5(inspect.getsource(run_active_grid.run).encode()).hexdigest()
-        assert digest == "fb9ec05bbca95aeeadaeba41937ba29b"
+        assert digest == "8006bb4314d8814665bc7d8a5bb3db14"
 
 
 # ---------------------------------------------------------------------------

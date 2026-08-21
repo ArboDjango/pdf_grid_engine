@@ -135,3 +135,52 @@ class TestProjectionAndSimulation:
     def test_p0_must_be_tick_aligned_without_silent_rounding(self):
         with pytest.raises(PreflightError, match="P0"):
             run_preflight(FakeSource(tick="0.1"), config(p0=Decimal("100.05"), geometry=GridGeometry.FLEXIBLE))
+
+
+class TestFrozenQ:
+    """q est une identité immuable de la grille, au même niveau que
+    P0/GLL/GUL/nu/nl : une fois config.q figé, run_preflight ne le
+    recalcule plus jamais depuis les soldes courants."""
+
+    def test_config_q_none_computes_q_from_current_balances(self):
+        # Comportement de création, inchangé : q=None -> calculé à partir
+        # du patrimoine disponible maintenant (déjà couvert par
+        # test_q_is_rounded_down_to_lot_size, reconfirmé ici explicitement).
+        report = run_preflight(FakeSource(base="0", quote="1000", lot="0.1"), config())
+        assert report.q == Decimal("1.2")
+
+    def test_config_q_set_is_used_verbatim_ignoring_balances(self):
+        report = run_preflight(FakeSource(base="0", quote="1000", lot="0.1"), config(q=Decimal("7")))
+        assert report.q == Decimal("7")
+
+    def test_frozen_q_survives_balance_variation_between_two_calls(self):
+        """Test obligatoire : report.q reste identique malgré une variation
+        du patrimoine, une fois q figé dans config."""
+        source = FakeSource(base="0", quote="1000", lot="0.1")
+        frozen_config = config(q=Decimal("7"))
+
+        report_before = run_preflight(source, frozen_config)
+        source.balances = Balances(Decimal("500"), Decimal("50000"), Decimal("500"), Decimal("50000"))
+        report_after = run_preflight(source, frozen_config)
+
+        assert report_before.q == report_after.q == Decimal("7")
+
+    def test_q_raw_remains_informational_even_when_q_is_frozen(self):
+        # q_raw continue de refléter ce que q vaudrait si recalculé
+        # maintenant -- purement informatif (format_report), jamais utilisé
+        # pour la matérialisation une fois q figé.
+        report = run_preflight(FakeSource(base="0", quote="1000", lot="0.1"), config(q=Decimal("7")))
+        assert report.q_raw == Decimal("1.298701298701298701298701299")
+        assert report.q == Decimal("7")
+
+    def test_frozen_q_still_enforces_min_size(self):
+        with pytest.raises(PreflightError, match="min_size"):
+            run_preflight(FakeSource(minimum="10"), config(q=Decimal("1")))
+
+    def test_frozen_q_must_be_strictly_positive(self):
+        with pytest.raises(PreflightError, match="strictement positif"):
+            run_preflight(FakeSource(), config(q=Decimal("0")))
+
+    def test_frozen_q_negative_is_rejected(self):
+        with pytest.raises(PreflightError, match="strictement positif"):
+            run_preflight(FakeSource(), config(q=Decimal("-1")))

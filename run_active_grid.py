@@ -80,6 +80,7 @@ import os
 import signal
 import tempfile
 import time
+from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 
 import market_reader
@@ -268,13 +269,13 @@ def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
     gul = Decimal(str(p0_float * (1 + sim["gul_pct"])))
     gll = Decimal(str(p0_float * (1 - sim["gll_pct"])))
 
-    config = PreflightConfig(
+    draft_config = PreflightConfig(
         inst_id=inst_id, gul=gul, gll=gll, nu=NU, nl=NL, p0=p0,
         geometry=CREATE_GEOMETRY, spacing_h_pct=abs(fees.maker),
         alpha=ALPHA, operational_margin=OPERATIONAL_MARGIN,
-    )
+    )  # q=None -- pas encore figé, ce brouillon ne sert jamais à l'activation
 
-    report = run_preflight(adapter, config)
+    report = run_preflight(adapter, draft_config)
     validation = validate_candidate(
         fees=fees, anchor_price=p0_float,
         buy_levels=tuple(float(level) for level in report.trellis[:NL]),
@@ -283,7 +284,10 @@ def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
     if not validation.valid:
         raise GridCreationRefused(f"Candidat économiquement INVALID : {validation.diagnostic()}")
 
-    return config
+    # q figé UNE SEULE FOIS ici, à partir du patrimoine disponible à cet
+    # instant précis -- devient l'identité économique immuable de cette
+    # grille, au même titre que P0/GLL/GUL/nu/nl, jamais recalculé ensuite.
+    return replace(draft_config, q=report.q)
 
 
 def pending_grid_state_path_for(inst_id: str) -> str:
@@ -304,9 +308,20 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
     partiellement écrit à l'emplacement final -- os.replace() est une
     opération atomique du système de fichiers.
 
-    Exactement les 12 champs nécessaires à reconstruire un PreflightConfig
-    identique -- Decimal sérialisés en chaînes, jamais en flottant.
+    Exactement les 13 champs nécessaires à reconstruire un PreflightConfig
+    identique -- Decimal sérialisés en chaînes, jamais en flottant. q fait
+    partie de l'identité immuable de la grille au même titre que P0/GLL/
+    GUL/nu/nl : ne doit JAMAIS être persisté tant qu'il n'a pas été figé
+    (voir build_optimized_config) -- écrire q=None serait une régression
+    silencieuse vers un q recalculé à chaque reprise.
     """
+    if config.q is None:
+        raise ValueError(
+            "save_grid_state : config.q est None -- l'identité économique "
+            "de cette grille n'a jamais été figée. Refus de persister un "
+            "état de grille sans q (jamais un q deviné ou recalculé plus "
+            "tard à la reprise)."
+        )
     payload = {
         "inst_id": config.inst_id,
         "p0": str(config.p0),
@@ -320,6 +335,7 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
         "operational_margin": str(config.operational_margin),
         "tick_size": str(instrument.tick_size),
         "lot_size": str(instrument.lot_size),
+        "q": str(config.q),
     }
     directory = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(prefix=".active_grid_state_", suffix=".tmp", dir=directory)
@@ -337,12 +353,29 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
         raise
 
 
+class LegacyGridStateWithoutQ(Exception):
+    """Levée par load_grid_state si un fichier de grille par ailleurs
+    valide (les 12 champs historiques présents) ne contient pas de q figé
+    -- signe d'une grille créée avant que q ne devienne une identité
+    immuable. Cette grille ne doit JAMAIS être reprise avec un q deviné ou
+    recalculé depuis les soldes courants : elle doit être arrêtée puis
+    recréée explicitement sous le nouveau mécanisme (aucune migration
+    automatique)."""
+
+
 def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
     """Charge le PreflightConfig persisté, ou retourne None si le fichier
-    est absent OU invalide -- NE LÈVE JAMAIS. Un fichier invalide doit être
-    traité exactement comme un fichier absent (repli sur création
-    optimisée), jamais comme une configuration historique fiable, jamais
-    comme une erreur fatale qui interromprait le service.
+    est absent OU structurellement invalide -- NE LÈVE JAMAIS dans ces
+    deux cas. Un fichier invalide doit être traité exactement comme un
+    fichier absent (repli sur création optimisée), jamais comme une
+    configuration historique fiable, jamais comme une erreur fatale qui
+    interromprait le service.
+
+    Exception délibérée à "ne lève jamais" : un fichier structurellement
+    valide mais dépourvu de q (grille legacy, antérieure à ce correctif)
+    lève LegacyGridStateWithoutQ -- ce cas ne doit jamais être confondu
+    avec une absence, qui déclencherait silencieusement une création
+    optimisée par-dessus une grille déjà active sur OKX.
     """
     if not os.path.exists(path):
         return None
@@ -351,6 +384,19 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
             payload = json.load(f)
         if not all(field in payload for field in _REQUIRED_STATE_FIELDS):
             return None
+        missing_q = "q" not in payload
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError, InvalidOperation, OSError):
+        return None
+
+    if missing_q:
+        raise LegacyGridStateWithoutQ(
+            f"{path} ne contient pas de q figé -- grille créée avant "
+            "l'immuabilité de q. Reprise refusée. Arrêter cette grille, "
+            "nettoyer son état persisté, puis la recréer sous le nouveau "
+            "mécanisme (aucun recalcul ni seed automatique de q)."
+        )
+
+    try:
         return PreflightConfig(
             inst_id=payload["inst_id"],
             gul=Decimal(payload["gul"]),
@@ -362,6 +408,7 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
             spacing_h_pct=Decimal(payload["spacing_h_pct"]),
             alpha=Decimal(payload["alpha"]),
             operational_margin=Decimal(payload["operational_margin"]),
+            q=Decimal(payload["q"]),
         )
     except (json.JSONDecodeError, KeyError, ValueError, TypeError, InvalidOperation, OSError):
         return None
@@ -421,7 +468,13 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
 
     instrument = adapter.get_instrument(inst_id)
     pending_path = pending_grid_state_path_for(inst_id)
-    pending_config = load_grid_state(pending_path)
+    try:
+        pending_config = load_grid_state(pending_path)
+    except LegacyGridStateWithoutQ as error:
+        print(f"❌ {error}")
+        print("\n========== SAFETY ==========")
+        print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+        return 1
 
     # Une initialisation patrimoniale interrompue possède priorité sur
     # active_grid_state : on doit reprendre EXACTEMENT la même grille,
@@ -480,7 +533,13 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
         run(adapter, config)
         return 0
 
-    loaded_config = load_grid_state(state_path)
+    try:
+        loaded_config = load_grid_state(state_path)
+    except LegacyGridStateWithoutQ as error:
+        print(f"❌ {error}")
+        print("\n========== SAFETY ==========")
+        print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+        return 1
 
     if loaded_config is not None:
         config = loaded_config
@@ -537,6 +596,14 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
     return 0
 
 
+class GridQNotFrozen(ValueError):
+    """Levée par run() si config.q est None -- l'identité économique de la
+    grille (q) n'a jamais été figée avant l'entrée en boucle. Jamais une
+    valeur à deviner ici : tout chemin de construction de config
+    (build_optimized_config, ou un state chargé) doit figer q avant
+    d'appeler run()."""
+
+
 def run(
     adapter,
     config: PreflightConfig,
@@ -554,12 +621,23 @@ def run(
     infinie, jusqu'à SIGINT). En usage réel, ne jamais fournir max_cycles.
 
     Retourne le nombre de cycles réellement exécutés.
+
+    Lève GridQNotFrozen si config.q est None -- refuse de démarrer plutôt
+    que de laisser run_preflight recalculer q à chaque cycle depuis les
+    soldes courants.
     """
+    if config.q is None:
+        raise GridQNotFrozen(
+            "config.q est None : l'identité économique de cette grille n'a "
+            "jamais été figée. run() refuse de démarrer plutôt que de "
+            "recalculer q à partir des soldes courants à chaque cycle."
+        )
     cycles_run = 0
     try:
         while max_cycles is None or cycles_run < max_cycles:
             # Même `config`, jamais recalculé -- report peut varier
-            # légitimement (soldes réels, q, spot_covered), le treillis non.
+            # légitimement (soldes réels, spot_covered), le treillis et q
+            # (désormais figés dans config) non.
             report = run_preflight(adapter, config)
             orchestration_result = run_exposure_cycle(adapter, report, k_buy, k_sell)
             if orchestration_result.activation_result.state != GridActivationState.ACTIVE:
@@ -680,7 +758,19 @@ def main() -> int:
         print(f"État persisté avec succès ({state_file_path_for(args.inst_id)}).")
 
     print("\n========== BOUCLE ACTIVE (Ctrl-C pour arrêter) ==========")
-    run(adapter, config)
+    try:
+        run(adapter, config)
+    except GridQNotFrozen as error:
+        print(f"❌ {error}")
+        print("\n========== SAFETY ==========")
+        print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+        print(
+            "--mode resume (build_historical_config) ne fige jamais q -- "
+            "chemin déjà noté comme non utilisé en production H24, "
+            "remplacé par --mode auto. Ajouter un q historique explicite "
+            "à build_historical_config si ce chemin doit revivre."
+        )
+        return 1
     return 0
 
 
