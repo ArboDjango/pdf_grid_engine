@@ -181,6 +181,62 @@ class TestFrozenQ:
         with pytest.raises(PreflightError, match="strictement positif"):
             run_preflight(FakeSource(), config(q=Decimal("0")))
 
+
+class TestAllocatedCapital:
+    """allocated_capital est une consigne d'allocation économique explicite
+    -- capital USDC nouvellement mis à disposition de la grille, jamais
+    additionné à la valeur de tokens déjà détenus dans le wallet."""
+
+    def test_preexisting_tokens_are_never_added_to_explicit_allocation(self):
+        """Preuve centrale : wallet avec 500 USDC + 100 XRP (base_total),
+        allocated_capital=200 -> report.allocated_capital == 200 très
+        exactement, jamais 200 + valeur(100 XRP). report.total_capital
+        reste la mesure du patrimoine réel complet, un champ distinct."""
+        source = FakeSource(base="100", quote="500")  # 100 tokens base + 500 USDC déjà détenus
+        report = run_preflight(source, config(allocated_capital=Decimal("200")))
+
+        assert report.allocated_capital == Decimal("200")
+        # p0=100 (config() par défaut) -> patrimoine réel = 500 + 100*100 = 10500,
+        # sans rapport avec les 200 alloués -- preuve que les deux ne sont jamais mélangés.
+        assert report.total_capital == Decimal("10500")
+        assert report.allocated_capital != report.total_capital
+
+    def test_multi_bot_allocations_never_mixed_with_each_other_nor_with_tokens(self):
+        """Trois grilles distinctes sur un même wallet (tokens variés déjà
+        détenus + 500 USDC) : chaque allocation reste strictement la sienne."""
+        source = FakeSource(base="1000", quote="500")
+
+        report_a = run_preflight(source, config(allocated_capital=Decimal("200")))
+        report_b = run_preflight(source, config(allocated_capital=Decimal("150")))
+        report_c = run_preflight(source, config(allocated_capital=Decimal("100")))
+
+        assert report_a.allocated_capital == Decimal("200")
+        assert report_b.allocated_capital == Decimal("150")
+        assert report_c.allocated_capital == Decimal("100")
+        # Somme des allocations < ce qui est réellement disponible (500) --
+        # jamais recalculée ou redistribuée automatiquement entre les trois.
+        assert report_a.allocated_capital + report_b.allocated_capital + report_c.allocated_capital == Decimal("450")
+
+    def test_allocated_capital_none_preserves_legacy_alpha_computation(self):
+        """Non-régression explicite : sans allocation explicite, le calcul
+        historique (alpha × patrimoine total, tokens déjà détenus inclus)
+        reste strictement inchangé."""
+        source = FakeSource(base="100", quote="500")
+        cfg = config()  # allocated_capital=None par défaut
+        report = run_preflight(source, cfg)
+
+        total_capital = source.balances.quote_total + source.balances.base_total * cfg.p0
+        assert report.total_capital == total_capital
+        assert report.allocated_capital == cfg.alpha * total_capital
+
+    def test_allocated_capital_must_be_strictly_positive(self):
+        with pytest.raises(PreflightError, match="allocated_capital"):
+            run_preflight(FakeSource(), config(allocated_capital=Decimal("0")))
+
+    def test_allocated_capital_negative_is_rejected(self):
+        with pytest.raises(PreflightError, match="allocated_capital"):
+            run_preflight(FakeSource(), config(allocated_capital=Decimal("-50")))
+
     def test_frozen_q_negative_is_rejected(self):
         with pytest.raises(PreflightError, match="strictement positif"):
             run_preflight(FakeSource(), config(q=Decimal("-1")))

@@ -130,7 +130,7 @@ class TestFourCasesIntegration:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: run_calls.append(1))
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert run_active_grid.load_grid_state(state_path) is not None
@@ -153,7 +153,7 @@ class TestFourCasesIntegration:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: run_calls.append(1))
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert run_active_grid.load_grid_state(state_path) is not None  # PERSISTÉ malgré PARTIALLY_EXPOSED
@@ -173,7 +173,7 @@ class TestFourCasesIntegration:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: run_calls.append(1))
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 2
         assert run_active_grid.load_grid_state(state_path) is None  # PAS persisté
@@ -192,7 +192,7 @@ class TestFourCasesIntegration:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: run_calls.append(1))
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 2
         assert run_active_grid.load_grid_state(state_path) is None
@@ -224,7 +224,7 @@ class TestNoCancellationIntroduced:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: None)
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         # Le SELL déjà placé reste rapporté tel quel dans activation_result --
         # jamais retiré, jamais annulé par ce correctif.
@@ -249,13 +249,13 @@ class TestNextCycleResumesNormally:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: None)
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         # Cycle suivant : run_auto_mode relance, trouve maintenant un état
         # persisté valide -> chemin REPRISE normal, jamais recréation.
         second_run_calls = []
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: second_run_calls.append(1))
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert second_run_calls == [1]
@@ -273,7 +273,7 @@ class TestActivatedUnchanged:
         monkeypatch.setattr(run_active_grid, "run", lambda a, c: None)
         monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "auto", "--live"])
 
-        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert run_active_grid.load_grid_state(state_path) is not None

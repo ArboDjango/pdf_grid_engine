@@ -121,13 +121,14 @@ def _bound_run(monkeypatch, max_cycles=1):
     monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original(adapter, config, max_cycles=max_cycles, sleep_fn=lambda s: None))
 
 
-def _write_valid_state(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044"):
+def _write_valid_state(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044", allocated_capital="20000"):
     import json
     payload = {
         "inst_id": inst_id, "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
         "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
         "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
         "q": q,
+        "allocated_capital": allocated_capital,
     }
     with open(path, "w") as f:
         json.dump(payload, f)
@@ -201,10 +202,10 @@ class TestInjOptimizationWhenNoInjState:
 
         captured_inst_ids = []
         original_optimizer = run_active_grid.build_optimized_config
-        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda adapter, inst_id: (captured_inst_ids.append(inst_id), original_optimizer(adapter, inst_id))[-1])
+        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda adapter, inst_id, **k: (captured_inst_ids.append(inst_id), original_optimizer(adapter, inst_id, **k))[-1])
         _bound_run(monkeypatch)
 
-        run_active_grid.run_auto_mode(fake_adapter, live=True, inst_id="INJ-USDT", state_path=inj_path)
+        run_active_grid.run_auto_mode(fake_adapter, live=True, inst_id="INJ-USDT", state_path=inj_path, allocated_capital_usdc=Decimal("200"))
 
         assert captured_inst_ids == ["INJ-USDT"]  # jamais XRP-USDC, malgré le fichier XRP présent à côté
 
@@ -236,10 +237,10 @@ class TestXrpCreationUnchangedByDefault:
         state_path = str(tmp_path / "state.json")
         captured_inst_ids = []
         original_optimizer = run_active_grid.build_optimized_config
-        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda adapter, inst_id: (captured_inst_ids.append(inst_id), original_optimizer(adapter, inst_id))[-1])
+        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda adapter, inst_id, **k: (captured_inst_ids.append(inst_id), original_optimizer(adapter, inst_id, **k))[-1])
         _bound_run(monkeypatch)
 
-        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)  # inst_id NON fourni
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))  # inst_id NON fourni
 
         assert captured_inst_ids == ["XRP-USDC"]  # défaut préservé
 
@@ -270,12 +271,13 @@ class TestRunUnchanged:
     def test_8_run_source_hash_unchanged(self):
         """Empreinte mise à jour délibérément -- voir
         test_run_active_grid_auto_mode.py::TestRunUnchanged pour la
-        justification complète (chantier q-immuable, garde GridQNotFrozen
-        ajoutée, aucune autre logique touchée)."""
+        justification complète (chantier allocated-capital, garde
+        GridAllocatedCapitalNotFrozen ajoutée, aucune autre logique
+        touchée)."""
         import hashlib
         import inspect
         digest = hashlib.md5(inspect.getsource(run_active_grid.run).encode()).hexdigest()
-        assert digest == "8006bb4314d8814665bc7d8a5bb3db14"
+        assert digest == "6940e5ab2782996723709ee6c88acd8c"
 
 
 # ---------------------------------------------------------------------------

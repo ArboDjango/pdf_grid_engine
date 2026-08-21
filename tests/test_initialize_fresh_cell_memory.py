@@ -54,17 +54,19 @@ def grid_config(**changes):
     return PreflightConfig(**values)
 
 
-def write_state_file(path, config, *, q="21.044"):
-    """q indépendant de config.q (souvent None dans ce fichier -- ces tests
-    laissent run_preflight le calculer librement depuis les soldes de
-    FakeAdapter) : uniquement nécessaire pour que le fichier écrit soit un
-    état de grille valide au sens de load_grid_state (q désormais requis)."""
+def write_state_file(path, config, *, q="21.044", allocated_capital="20000"):
+    """q/allocated_capital indépendants de config.q/config.allocated_capital
+    (souvent None dans ce fichier -- ces tests laissent run_preflight les
+    calculer librement depuis les soldes de FakeAdapter) : uniquement
+    nécessaires pour que le fichier écrit soit un état de grille valide au
+    sens de load_grid_state (les deux désormais requis)."""
     payload = {
         "inst_id": config.inst_id, "p0": str(config.p0), "gll": str(config.gll), "gul": str(config.gul),
         "nu": config.nu, "nl": config.nl, "geometry": config.geometry.name,
         "spacing_h_pct": str(config.spacing_h_pct), "alpha": str(config.alpha),
         "operational_margin": str(config.operational_margin), "tick_size": "0.0001", "lot_size": "0.001",
         "q": q,
+        "allocated_capital": allocated_capital,
     }
     with open(path, "w") as f:
         json.dump(payload, f)

@@ -150,16 +150,16 @@ class TestOptimizerCalledExactlyOnce:
         calls = []
         original = run_active_grid.build_optimized_config
 
-        def counting_wrapper(adapter, inst_id):
+        def counting_wrapper(adapter, inst_id, **kwargs):
             calls.append(1)
-            return original(adapter, inst_id)
+            return original(adapter, inst_id, **kwargs)
 
         monkeypatch.setattr(run_active_grid, "build_optimized_config", counting_wrapper)
 
         original_run = run_active_grid.run
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original_run(adapter, config, max_cycles=1, sleep_fn=lambda s: None))
 
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -190,7 +190,7 @@ class TestSameConfigObjectThroughout:
             return original_run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
 
         monkeypatch.setattr(run_active_grid, "run", spy_run)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -225,7 +225,7 @@ class TestNoChangeBetweenActivationAndExecution:
             return original_run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
 
         monkeypatch.setattr(run_active_grid, "run", spy_run)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -246,7 +246,7 @@ class TestInvalidBlocksActivation:
         from grid_trading_controller import GridTradingController
         monkeypatch.setattr(GridTradingController, "run", lambda self, *a, **k: activation_calls.append(1))
 
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         exit_code = run_active_grid.main()
 
@@ -293,7 +293,7 @@ class TestNoExtraMarketReaderDuringLoop:
         original_run = run_active_grid.run
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original_run(adapter, config, max_cycles=3, sleep_fn=lambda s: None))
 
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -312,10 +312,61 @@ class TestNoWriteWithoutLiveInCreateMode:
         activation_calls = []
         from grid_trading_controller import GridTradingController
         monkeypatch.setattr(GridTradingController, "run", lambda self, *a, **k: activation_calls.append(1))
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create"])  # sans --live
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "200"])  # sans --live
 
         exit_code = run_active_grid.main()
 
         assert exit_code == 0
         assert activation_calls == []
         assert fake_adapter.placed_orders == []
+
+
+# ---------------------------------------------------------------------------
+# 9 — --allocated-capital-usdc : requis pour --mode create, quel que soit --live
+# ---------------------------------------------------------------------------
+
+class TestAllocatedCapitalCliRequired:
+    def test_create_without_flag_refuses_even_readonly(self, fake_adapter, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create"])  # sans --allocated-capital-usdc, sans --live
+
+        exit_code = run_active_grid.main()
+
+        assert exit_code == 1
+        assert fake_adapter.placed_orders == []
+        assert "--allocated-capital-usdc" in capsys.readouterr().out
+
+    def test_create_with_live_without_flag_refuses_before_any_activation(self, fake_adapter, monkeypatch):
+        activation_calls = []
+        from grid_trading_controller import GridTradingController
+        monkeypatch.setattr(GridTradingController, "run", lambda self, *a, **k: activation_calls.append(1))
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])  # sans allocation
+
+        exit_code = run_active_grid.main()
+
+        assert exit_code == 1
+        assert activation_calls == []
+        assert fake_adapter.placed_orders == []
+
+    def test_invalid_decimal_value_refuses_explicitly(self, fake_adapter, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "not-a-number"])
+
+        exit_code = run_active_grid.main()
+
+        assert exit_code == 1
+        assert "invalide" in capsys.readouterr().out.lower()
+
+    def test_zero_or_negative_value_refuses_explicitly(self, fake_adapter, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "0"])
+
+        exit_code = run_active_grid.main()
+
+        assert exit_code == 1
+        assert "strictement positif" in capsys.readouterr().out
+
+    def test_resume_mode_does_not_require_the_flag(self, fake_adapter, monkeypatch):
+        """--mode resume (défaut) reste inchangé : le flag n'est jamais exigé ici."""
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py"])  # défaut = resume, sans le flag
+
+        exit_code = run_active_grid.main()
+
+        assert exit_code == 0

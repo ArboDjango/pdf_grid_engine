@@ -126,12 +126,13 @@ def _bound_run(monkeypatch, max_cycles=1):
     monkeypatch.setattr(run_active_grid, "run", lambda adapter, config, **k: original(adapter, config, max_cycles=max_cycles, sleep_fn=lambda s: None))
 
 
-def _write_valid_state(path, *, p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044"):
+def _write_valid_state(path, *, p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044", allocated_capital="20000"):
     payload = {
         "inst_id": "XRP-USDC", "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
         "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
         "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
         "q": q,
+        "allocated_capital": allocated_capital,
     }
     with open(path, "w") as f:
         json.dump(payload, f)
@@ -179,7 +180,7 @@ class TestCreateWhenNoState:
         monkeypatch.setattr(mr, "read", lambda *a, **k: (calls.append(1), original_read(*a, **k))[-1])
         _bound_run(monkeypatch)
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert len(calls) == 1
@@ -215,7 +216,7 @@ class TestQFrozenAtCreation:
     def test_new_grid_freezes_and_persists_q(self, fake_adapter, monkeypatch, state_path):
         _bound_run(monkeypatch)
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         with open(state_path) as f:
@@ -255,7 +256,7 @@ class TestPolicyCalledOnce:
         monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda *a, **k: (calls.append(1), original(*a, **k))[-1])
         _bound_run(monkeypatch)
 
-        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert len(calls) == 1
 
@@ -271,7 +272,7 @@ class TestInvalidBlocksActivationAndPersistence:
         activation_calls = []
         monkeypatch.setattr(GridTradingController, "run", lambda self, *a, **k: activation_calls.append(1))
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 1
         assert activation_calls == []
@@ -284,7 +285,7 @@ class TestInvalidBlocksActivationAndPersistence:
             lambda self, adapter, config, **kwargs: GridTradingResult(GridTradingState.ERROR, "1", None, None, "échec simulé"),
         )
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 2
         assert not os.path.exists(state_path)
@@ -313,7 +314,7 @@ class TestSameConfigObject:
 
         monkeypatch.setattr(run_active_grid, "run", spy_run)
 
-        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert captured["activation"] == captured["run"]
 
@@ -349,7 +350,7 @@ class TestCorruptedStateFile:
         monkeypatch.setattr(mr, "read", lambda *a, **k: (calls.append(1), original_read(*a, **k))[-1])
         _bound_run(monkeypatch)
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert len(calls) == 1  # repli sur création, jamais une tentative de "deviner"
@@ -378,16 +379,17 @@ class TestCorruptedStateFile:
 # 9 — écriture atomique
 # ---------------------------------------------------------------------------
 
-def _historical_config_with_q(fake_adapter, inst_id, q="21.044"):
-    """build_historical_config() ne fige jamais q (chemin --mode resume,
-    déjà noté comme non utilisé en production H24) -- ces tests de
-    persistance ont seulement besoin d'un PreflightConfig quelconque déjà
-    valide, avec q figé comme l'exige désormais save_grid_state."""
-    return replace(run_active_grid.build_historical_config(fake_adapter, inst_id), q=Decimal(q))
+def _historical_config_with_q(fake_adapter, inst_id, q="21.044", allocated_capital="20000"):
+    """build_historical_config() ne fige jamais q ni allocated_capital
+    (chemin --mode resume, déjà noté comme non utilisé en production H24)
+    -- ces tests de persistance ont seulement besoin d'un PreflightConfig
+    quelconque déjà valide, avec les deux figés comme l'exige désormais
+    save_grid_state."""
+    return replace(run_active_grid.build_historical_config(fake_adapter, inst_id), q=Decimal(q), allocated_capital=Decimal(allocated_capital))
 
 
 class TestAtomicWrite:
-    def test_9_state_file_contains_exact_thirteen_fields(self, fake_adapter, state_path):
+    def test_9_state_file_contains_exact_fourteen_fields(self, fake_adapter, state_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
         config = _historical_config_with_q(fake_adapter, "XRP-USDC")
 
@@ -395,7 +397,7 @@ class TestAtomicWrite:
 
         with open(state_path) as f:
             payload = json.load(f)
-        assert set(payload.keys()) == set(run_active_grid._REQUIRED_STATE_FIELDS) | {"q"}
+        assert set(payload.keys()) == set(run_active_grid._REQUIRED_STATE_FIELDS) | {"q", "allocated_capital"}
 
     def test_9_decimals_serialized_as_strings(self, fake_adapter, state_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
@@ -409,6 +411,7 @@ class TestAtomicWrite:
         assert isinstance(payload["gll"], str)
         assert isinstance(payload["gul"], str)
         assert isinstance(payload["q"], str)
+        assert isinstance(payload["allocated_capital"], str)
 
     def test_9_no_temp_file_left_behind_after_successful_write(self, fake_adapter, state_path, tmp_path):
         instrument = fake_adapter.get_instrument("XRP-USDC")
@@ -436,6 +439,7 @@ class TestAtomicWrite:
         assert reloaded.alpha == original_config.alpha
         assert reloaded.operational_margin == original_config.operational_margin
         assert reloaded.q == original_config.q
+        assert reloaded.allocated_capital == original_config.allocated_capital
 
     def test_9_write_uses_os_replace_not_direct_write(self):
         import inspect
@@ -450,7 +454,7 @@ class TestAtomicWrite:
             GridTradingController, "run",
             lambda self, adapter, config, **kwargs: GridTradingResult(GridTradingState.PARTIAL if hasattr(GridTradingState, "PARTIAL") else GridTradingState.ERROR, "1", None, None, "non activé"),
         )
-        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
         assert not os.path.exists(state_path)
 
 
@@ -460,16 +464,17 @@ class TestAtomicWrite:
 
 class TestRunUnchanged:
     def test_10_run_function_unchanged(self):
-        """Empreinte mise à jour délibérément (chantier q-immuable) :
-        run() refuse désormais explicitement de démarrer si config.q est
-        None (GridQNotFrozen) -- seule addition de logique, aucune autre
+        """Empreinte mise à jour délibérément (chantier allocated-capital) :
+        run() refuse désormais aussi explicitement de démarrer si
+        config.allocated_capital est None (GridAllocatedCapitalNotFrozen),
+        symétrique à la garde q déjà en place -- aucune autre logique
         touchée (vérifié ci-dessous : ni market_reader ni load_grid_state
         n'apparaissent, exactement comme avant)."""
         import hashlib
         import inspect
         source = inspect.getsource(run_active_grid.run)
         digest = hashlib.md5(source.encode()).hexdigest()
-        assert digest == "8006bb4314d8814665bc7d8a5bb3db14"
+        assert digest == "6940e5ab2782996723709ee6c88acd8c"
         assert "market_reader" not in source
         assert "load_grid_state" not in source
         assert "save_grid_state" not in source
@@ -510,3 +515,145 @@ class TestLegacyStateWithoutQRefused:
 
         assert exit_code == 1
         assert optimizer_calls == []  # jamais de création silencieuse par-dessus une grille legacy
+
+
+# ---------------------------------------------------------------------------
+# 12 — grille legacy avec q mais sans allocated_capital : reprise refusée
+# ---------------------------------------------------------------------------
+
+def _write_state_with_q_but_no_allocated_capital(path, *, inst_id="XRP-USDC", p0="1.0013", gll="0.951235", gul="1.0563715", q="21.044"):
+    """Reproduit un fichier créé sous feature/q-immutable-grid-identity
+    (q présent) mais avant ce chantier d'allocation (allocated_capital
+    absent)."""
+    payload = {
+        "inst_id": inst_id, "p0": p0, "gll": gll, "gul": gul, "nu": 5, "nl": 5,
+        "geometry": "FLEXIBLE", "spacing_h_pct": "0.0008", "alpha": "0.95",
+        "operational_margin": "0.50", "tick_size": "0.0001", "lot_size": "0.001",
+        "q": q,
+    }
+    with open(path, "w") as f:
+        json.dump(payload, f)
+
+
+class TestLegacyStateWithoutAllocatedCapitalRefused:
+    def test_load_grid_state_raises_legacy_error(self, state_path):
+        _write_state_with_q_but_no_allocated_capital(state_path)
+
+        with pytest.raises(run_active_grid.LegacyGridStateWithoutAllocatedCapital):
+            run_active_grid.load_grid_state(state_path)
+
+    def test_run_auto_mode_refuses_without_creating_new_grid(self, fake_adapter, monkeypatch, state_path):
+        _write_state_with_q_but_no_allocated_capital(state_path)
+
+        optimizer_calls = []
+        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda *a, **k: optimizer_calls.append(1))
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        assert exit_code == 1
+        assert optimizer_calls == []  # jamais de création silencieuse par-dessus une grille legacy
+
+
+# ---------------------------------------------------------------------------
+# 13 — allocated_capital figé à la création puis persisté avec q
+# ---------------------------------------------------------------------------
+
+class TestAllocatedCapitalFrozenAtCreation:
+    def test_new_grid_freezes_and_persists_allocated_capital(self, fake_adapter, monkeypatch, state_path):
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
+
+        assert exit_code == 0
+        with open(state_path) as f:
+            payload = json.load(f)
+        assert payload["allocated_capital"] == "200"
+        loaded = run_active_grid.load_grid_state(state_path)
+        assert loaded.allocated_capital == Decimal("200")
+
+
+# ---------------------------------------------------------------------------
+# 14 — reprise : allocated_capital chargé depuis le state, jamais recalculé
+# ---------------------------------------------------------------------------
+
+class TestAllocatedCapitalLoadedNotRecalculatedOnResume:
+    def test_resume_loads_persisted_allocated_capital_ignoring_current_balances(self, fake_adapter, monkeypatch, state_path):
+        _write_valid_state(state_path, allocated_capital="150")
+        # Soldes actuels sans rapport avec l'allocation historique -- elle
+        # ne doit jamais être redérivée depuis eux à la reprise.
+        fake_adapter.balances = Balances(Decimal("999999"), Decimal("999999"), Decimal("999999"), Decimal("999999"))
+        _bound_run(monkeypatch)
+
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        loaded = run_active_grid.load_grid_state(state_path)
+        assert loaded.allocated_capital == Decimal("150")
+
+    def test_allocated_capital_usdc_argument_ignored_with_explicit_message_on_resume(self, fake_adapter, monkeypatch, state_path, capsys):
+        _write_valid_state(state_path, allocated_capital="150")
+        _bound_run(monkeypatch)
+
+        run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("999"))
+
+        loaded = run_active_grid.load_grid_state(state_path)
+        assert loaded.allocated_capital == Decimal("150")  # jamais remplacé par 999
+        output = capsys.readouterr().out
+        assert "999" in output and "ignoré" in output  # message explicite, jamais silencieux
+
+
+# ---------------------------------------------------------------------------
+# 15 — --allocated-capital-usdc requis pour toute création (absence -> refus)
+# ---------------------------------------------------------------------------
+
+class TestAllocatedCapitalRequiredForCreation:
+    def test_creation_without_allocated_capital_usdc_refuses(self, fake_adapter, monkeypatch, state_path):
+        optimizer_calls = []
+        monkeypatch.setattr(run_active_grid, "build_optimized_config", lambda *a, **k: optimizer_calls.append(1))
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path)
+
+        assert exit_code == 1
+        assert optimizer_calls == []
+        assert not os.path.exists(state_path)
+
+
+# ---------------------------------------------------------------------------
+# 16 — capital insuffisant à la création : refus explicite, aucun état écrit
+# ---------------------------------------------------------------------------
+
+class TestAllocatedCapitalInsufficientAtCreation:
+    def test_allocation_exceeding_available_quote_refuses_creation(self, fake_adapter, monkeypatch, state_path):
+        fake_adapter.balances = Balances(Decimal("20000"), Decimal("50"), Decimal("20000"), Decimal("50"))  # 50 USDC dispo
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
+
+        assert exit_code == 1
+        assert not os.path.exists(state_path)
+
+    def test_allocation_exactly_equal_to_available_quote_succeeds(self, fake_adapter, monkeypatch, state_path):
+        fake_adapter.balances = Balances(Decimal("20000"), Decimal("200"), Decimal("20000"), Decimal("200"))  # exactement 200 dispo
+        _bound_run(monkeypatch)
+
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
+
+        assert exit_code == 0
+        assert os.path.exists(state_path)
+
+    def test_insufficient_capital_never_checked_again_once_running(self, fake_adapter, monkeypatch, state_path):
+        """Après création réussie, les propres ordres BUY de la grille
+        immobilisent du quote -- cela ne doit jamais redéclencher le refus
+        de capital insuffisant lors des cycles suivants."""
+        _bound_run(monkeypatch)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, state_path=state_path, allocated_capital_usdc=Decimal("200"))
+        assert exit_code == 0
+
+        # Simule des ordres déjà placés ayant consommé la quasi-totalité du quote.
+        fake_adapter.balances = Balances(Decimal("20000"), Decimal("1"), Decimal("20000"), Decimal("1"))
+        config = run_active_grid.load_grid_state(state_path)
+
+        # run() ne revérifie jamais allocated_capital contre quote_available --
+        # aucune exception levée ici malgré un quote quasiment épuisé.
+        run_active_grid.run(fake_adapter, config, max_cycles=1, sleep_fn=lambda s: None)

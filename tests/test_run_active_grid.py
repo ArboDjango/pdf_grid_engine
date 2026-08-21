@@ -28,7 +28,7 @@ from okx_spot_adapter import (
     OrderSnapshot,
     PlacementResult,
 )
-from run_active_grid import run
+from run_active_grid import GridAllocatedCapitalNotFrozen, run
 from trellis_calculator import GridGeometry
 
 
@@ -96,10 +96,12 @@ def grid_config(**changes):
         inst_id="XRP-USDC", gul=Decimal("1.0563715"), gll=Decimal("0.951235"), nu=5, nl=5,
         p0=Decimal("1.0013"), geometry=GridGeometry.FLEXIBLE,
         spacing_h_pct=Decimal("0.0008"), alpha=Decimal("0.95"), operational_margin=Decimal("0.50"),
-        # q figé par défaut -- run() l'exige désormais (identité immuable de
-        # la grille) ; 21.044 correspond à la quantité historique réelle
-        # utilisée par les scénarios de fill/ordre déjà ouvert de ce fichier.
+        # q et allocated_capital figés par défaut -- run() les exige
+        # désormais (identité immuable de la grille) ; 21.044 correspond à
+        # la quantité historique réelle utilisée par les scénarios de
+        # fill/ordre déjà ouvert de ce fichier.
         q=Decimal("21.044"),
+        allocated_capital=Decimal("20000"),
     )
     values.update(changes)
     return PreflightConfig(**values)
@@ -292,6 +294,18 @@ class TestRealCaseBuyFilledSellLive:
         run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
 
         assert id(config) == config_id_before  # jamais recalculé, cause éliminée par ce chantier
+
+
+class TestAllocatedCapitalNotFrozenRefused:
+    """run() refuse de démarrer si config.allocated_capital est None --
+    identité économique incomplète, même si q est déjà figé."""
+
+    def test_run_raises_grid_allocated_capital_not_frozen(self):
+        adapter = FakeAdapter()
+        config = grid_config(allocated_capital=None)  # q figé, allocated_capital non figé
+
+        with pytest.raises(GridAllocatedCapitalNotFrozen):
+            run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
 
 
 class TestRegressionDifferentConfigForbidden:

@@ -148,7 +148,7 @@ class TestComputedOnce:
         assert fake_adapter.get_ticker_calls == 1
 
     def test_2_get_ticker_never_called_again_during_subsequent_cycles(self, fake_adapter):
-        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
+        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
         calls_after_creation = fake_adapter.get_ticker_calls
 
         run_active_grid.run(fake_adapter, config, max_cycles=3, sleep_fn=lambda s: None)
@@ -162,7 +162,7 @@ class TestComputedOnce:
 
 class TestRunNeverConsultsMarketReader:
     def test_3_run_never_imports_or_calls_market_reader(self, fake_adapter, monkeypatch):
-        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
+        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
 
         calls = []
         import market_reader as mr
@@ -185,7 +185,7 @@ class TestRunNeverConsultsMarketReader:
 
 class TestSameConfigAcrossCycles:
     def test_4_id_config_unchanged_across_cycles_create_mode(self, fake_adapter):
-        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
+        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
         config_id = id(config)
 
         run_active_grid.run(fake_adapter, config, max_cycles=4, sleep_fn=lambda s: None)
@@ -235,7 +235,7 @@ class TestInvalidValidationBlocksCreation:
     def test_6_main_create_mode_returns_nonzero_and_no_write_on_invalid(self, fake_adapter, monkeypatch, capsys):
         from grid_economic_validator import GridEconomicValidation
         monkeypatch.setattr(run_active_grid, "validate_candidate", lambda **k: GridEconomicValidation(valid=False, violations=()))
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "200"])
 
         exit_code = run_active_grid.main()
 
@@ -257,7 +257,7 @@ class TestNonRegressionCoreMechanisms:
         même gi et le tie-break (préférence pour un ordre déjà ouvert)
         fonctionnent identiquement, quelle que soit l'origine de `config`.
         """
-        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
+        config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
         report = run_preflight(fake_adapter, config)
 
         lower_levels = sorted(float(g) for g in report.trellis if float(g) < float(config.p0))
@@ -312,7 +312,7 @@ class TestNonRegressionCoreMechanisms:
 
 class TestNoRealOrderDuringTests:
     def test_10_no_write_call_in_readonly_create_mode(self, fake_adapter, monkeypatch, capsys):
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create"])  # sans --live
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "200"])  # sans --live
 
         exit_code = run_active_grid.main()
 
@@ -343,7 +343,7 @@ class TestCreateLivePersistsAfterActivated:
         # neutralisé pour que main() retourne, sans jamais désactiver la
         # persistance elle-même (appelée AVANT ce point dans main()).
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config: None)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         exit_code = run_active_grid.main()
 
@@ -357,9 +357,9 @@ class TestCreateLivePersistsAfterActivated:
         state_path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         monkeypatch.setattr(run_active_grid, "state_file_path_for", lambda inst_id: state_path)
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config: None)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
-        expected_config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
+        expected_config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
         run_active_grid.main()
 
         loaded = run_active_grid.load_grid_state(state_path)
@@ -376,7 +376,7 @@ class TestCreateLivePersistsAfterActivated:
             GridTradingController, "run",
             lambda self, *a, **k: GridTradingResult(GridTradingState.ERROR, "1", None, None, "échec simulé"),
         )
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         exit_code = run_active_grid.main()
 
@@ -393,7 +393,7 @@ class TestCreateLivePersistsAfterActivated:
             GridTradingController, "run",
             lambda self, *a, **k: GridTradingResult(GridTradingState.EXPOSURE_CONFLICT, "1", None, None, "conflit simulé"),
         )
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -411,7 +411,7 @@ class TestCreateLivePersistsAfterActivated:
             observed["loaded_at_run_entry"] = run_active_grid.load_grid_state(state_path)
 
         monkeypatch.setattr(run_active_grid, "run", spy_run)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -422,7 +422,7 @@ class TestCreateLivePersistsAfterActivated:
         state_path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         monkeypatch.setattr(run_active_grid, "state_file_path_for", lambda inst_id: state_path)
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config: None)
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -436,7 +436,7 @@ class TestCreateLivePersistsAfterActivated:
         monkeypatch.setattr(run_active_grid, "state_file_path_for", lambda inst_id: state_path)
         monkeypatch.setattr(run_active_grid, "run", lambda adapter, config: None)
 
-        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, inst_id="XRP-USDC", state_path=state_path)
+        exit_code = run_active_grid.run_auto_mode(fake_adapter, live=True, inst_id="XRP-USDC", state_path=state_path, allocated_capital_usdc=Decimal("200"))
 
         assert exit_code == 0
         assert run_active_grid.load_grid_state(state_path) is not None

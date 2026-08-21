@@ -240,7 +240,7 @@ def _simulate_policy(atr_norm_15m: float, di_ratio_15m: float) -> dict:
     return {"base_pct": base_pct, "force": force, "gul_mult": gul_mult, "gll_mult": gll_mult, "gul_pct": gul_pct, "gll_pct": gll_pct}
 
 
-def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
+def build_optimized_config(adapter, inst_id: str, allocated_capital_usdc: Decimal | None = None) -> PreflightConfig:
     """Construit le PreflightConfig d'une NOUVELLE grille, via la policy
     V1 déjà validée : MarketReader 15 min -> ATR normalisé + DI ratio ->
     GLL/GUL -> validation économique -> PreflightConfig.
@@ -249,10 +249,22 @@ def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
     run(). P0 est lu ici, une seule fois (get_ticker), jamais relu ensuite
     pendant la vie de cette grille.
 
+    allocated_capital_usdc : consigne d'allocation économique explicite --
+    capital USDC nouvellement mis à disposition de CETTE grille, à
+    l'exclusion de la valeur de tout token déjà détenu dans le wallet
+    (jamais additionné à celle-ci). None (par défaut) : repli sur l'ancien
+    calcul alpha × patrimoine total -- préserve tel quel tout appelant qui
+    n'a pas encore adopté ce mécanisme (l'exigence "toujours explicite à
+    la création" est appliquée par l'appelant CLI, pas ici).
+
     Lève GridCreationRefused si les données de marché sont insuffisantes
-    (MarketReaderError) ou si le candidat est économiquement INVALID --
-    aucune grille n'est alors retournée, conformément au principe déjà
-    établi : le candidat est simplement rejeté, jamais ajusté silencieusement.
+    (MarketReaderError), si allocated_capital_usdc dépasse le quote
+    réellement disponible MAINTENANT (vérifié une seule fois, ici, jamais
+    revérifié une fois la grille active -- les propres ordres BUY de la
+    grille immobiliseront légitimement du quote par la suite), ou si le
+    candidat est économiquement INVALID -- aucune grille n'est alors
+    retournée, conformément au principe déjà établi : le candidat est
+    simplement rejeté, jamais ajusté silencieusement.
     """
     ticker = adapter.get_ticker(inst_id)
     p0 = ticker.last
@@ -273,9 +285,18 @@ def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
         inst_id=inst_id, gul=gul, gll=gll, nu=NU, nl=NL, p0=p0,
         geometry=CREATE_GEOMETRY, spacing_h_pct=abs(fees.maker),
         alpha=ALPHA, operational_margin=OPERATIONAL_MARGIN,
+        allocated_capital=allocated_capital_usdc,
     )  # q=None -- pas encore figé, ce brouillon ne sert jamais à l'activation
 
     report = run_preflight(adapter, draft_config)
+
+    if allocated_capital_usdc is not None and allocated_capital_usdc > report.balances.quote_available:
+        raise GridCreationRefused(
+            f"allocated_capital_usdc={allocated_capital_usdc} dépasse le quote "
+            f"réellement disponible={report.balances.quote_available} -- capital "
+            "insuffisant, aucune grille créée"
+        )
+
     validation = validate_candidate(
         fees=fees, anchor_price=p0_float,
         buy_levels=tuple(float(level) for level in report.trellis[:NL]),
@@ -284,9 +305,10 @@ def build_optimized_config(adapter, inst_id: str) -> PreflightConfig:
     if not validation.valid:
         raise GridCreationRefused(f"Candidat économiquement INVALID : {validation.diagnostic()}")
 
-    # q figé UNE SEULE FOIS ici, à partir du patrimoine disponible à cet
-    # instant précis -- devient l'identité économique immuable de cette
-    # grille, au même titre que P0/GLL/GUL/nu/nl, jamais recalculé ensuite.
+    # q figé UNE SEULE FOIS ici, à partir de l'allocation (explicite ou
+    # legacy) disponible à cet instant précis -- devient l'identité
+    # économique immuable de cette grille, au même titre que
+    # P0/GLL/GUL/nu/nl, jamais recalculé ensuite.
     return replace(draft_config, q=report.q)
 
 
@@ -308,12 +330,13 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
     partiellement écrit à l'emplacement final -- os.replace() est une
     opération atomique du système de fichiers.
 
-    Exactement les 13 champs nécessaires à reconstruire un PreflightConfig
-    identique -- Decimal sérialisés en chaînes, jamais en flottant. q fait
-    partie de l'identité immuable de la grille au même titre que P0/GLL/
-    GUL/nu/nl : ne doit JAMAIS être persisté tant qu'il n'a pas été figé
-    (voir build_optimized_config) -- écrire q=None serait une régression
-    silencieuse vers un q recalculé à chaque reprise.
+    Exactement les 14 champs nécessaires à reconstruire un PreflightConfig
+    identique -- Decimal sérialisés en chaînes, jamais en flottant. q et
+    allocated_capital font partie de l'identité immuable de la grille au
+    même titre que P0/GLL/GUL/nu/nl : ne doivent JAMAIS être persistés tant
+    qu'ils n'ont pas été figés (voir build_optimized_config) -- écrire
+    q=None ou allocated_capital=None serait une régression silencieuse vers
+    une valeur recalculée/devinée à chaque reprise.
     """
     if config.q is None:
         raise ValueError(
@@ -321,6 +344,14 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
             "de cette grille n'a jamais été figée. Refus de persister un "
             "état de grille sans q (jamais un q deviné ou recalculé plus "
             "tard à la reprise)."
+        )
+    if config.allocated_capital is None:
+        raise ValueError(
+            "save_grid_state : config.allocated_capital est None -- la "
+            "consigne d'allocation économique de cette grille n'a jamais "
+            "été figée. Refus de persister un état de grille sans "
+            "allocated_capital (jamais deviné ni recalculé plus tard à la "
+            "reprise)."
         )
     payload = {
         "inst_id": config.inst_id,
@@ -336,6 +367,7 @@ def save_grid_state(config: PreflightConfig, instrument, path: str = STATE_FILE_
         "tick_size": str(instrument.tick_size),
         "lot_size": str(instrument.lot_size),
         "q": str(config.q),
+        "allocated_capital": str(config.allocated_capital),
     }
     directory = os.path.dirname(os.path.abspath(path)) or "."
     fd, tmp_path = tempfile.mkstemp(prefix=".active_grid_state_", suffix=".tmp", dir=directory)
@@ -363,6 +395,17 @@ class LegacyGridStateWithoutQ(Exception):
     automatique)."""
 
 
+class LegacyGridStateWithoutAllocatedCapital(Exception):
+    """Levée par load_grid_state si un fichier de grille contient déjà q
+    (donc créé sous feature/q-immutable-grid-identity) mais pas
+    allocated_capital -- signe d'une grille créée avant ce chantier
+    d'allocation de capital explicite. Même doctrine que
+    LegacyGridStateWithoutQ : reprise refusée, aucune migration
+    automatique, aucun allocated_capital deviné depuis le q déjà figé ni
+    depuis les soldes courants -- arrêter cette grille puis la recréer
+    explicitement avec --allocated-capital-usdc."""
+
+
 def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
     """Charge le PreflightConfig persisté, ou retourne None si le fichier
     est absent OU structurellement invalide -- NE LÈVE JAMAIS dans ces
@@ -371,11 +414,14 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
     configuration historique fiable, jamais comme une erreur fatale qui
     interromprait le service.
 
-    Exception délibérée à "ne lève jamais" : un fichier structurellement
-    valide mais dépourvu de q (grille legacy, antérieure à ce correctif)
-    lève LegacyGridStateWithoutQ -- ce cas ne doit jamais être confondu
-    avec une absence, qui déclencherait silencieusement une création
-    optimisée par-dessus une grille déjà active sur OKX.
+    Exceptions délibérées à "ne lève jamais" : un fichier structurellement
+    valide mais dépourvu de q (grille legacy, antérieure à
+    feature/q-immutable-grid-identity) lève LegacyGridStateWithoutQ ; un
+    fichier avec q mais sans allocated_capital (antérieur à ce chantier)
+    lève LegacyGridStateWithoutAllocatedCapital -- ni l'un ni l'autre ne
+    doit jamais être confondu avec une absence, qui déclencherait
+    silencieusement une création optimisée par-dessus une grille déjà
+    active sur OKX.
     """
     if not os.path.exists(path):
         return None
@@ -385,6 +431,7 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
         if not all(field in payload for field in _REQUIRED_STATE_FIELDS):
             return None
         missing_q = "q" not in payload
+        missing_allocated_capital = "allocated_capital" not in payload
     except (json.JSONDecodeError, KeyError, ValueError, TypeError, InvalidOperation, OSError):
         return None
 
@@ -394,6 +441,13 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
             "l'immuabilité de q. Reprise refusée. Arrêter cette grille, "
             "nettoyer son état persisté, puis la recréer sous le nouveau "
             "mécanisme (aucun recalcul ni seed automatique de q)."
+        )
+    if missing_allocated_capital:
+        raise LegacyGridStateWithoutAllocatedCapital(
+            f"{path} contient q mais pas allocated_capital -- grille créée "
+            "avant le chantier d'allocation de capital explicite. Reprise "
+            "refusée. Arrêter cette grille, nettoyer son état persisté, "
+            "puis la recréer avec --allocated-capital-usdc."
         )
 
     try:
@@ -409,6 +463,7 @@ def load_grid_state(path: str = STATE_FILE_PATH) -> PreflightConfig | None:
             alpha=Decimal(payload["alpha"]),
             operational_margin=Decimal(payload["operational_margin"]),
             q=Decimal(payload["q"]),
+            allocated_capital=Decimal(payload["allocated_capital"]),
         )
     except (json.JSONDecodeError, KeyError, ValueError, TypeError, InvalidOperation, OSError):
         return None
@@ -441,15 +496,24 @@ def _has_real_orders(activation) -> bool:
     return bool(result.placed or result.already_open or result.already_filled)
 
 
-def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str | None = None) -> int:
+def run_auto_mode(
+    adapter,
+    live: bool,
+    inst_id: str = INST_ID,
+    state_path: str | None = None,
+    allocated_capital_usdc: Decimal | None = None,
+) -> int:
     """Cycle complet --mode auto -- chemin NOUVEAU, indépendant de resume/
     create (toutes deux inchangées, jamais appelées par cette fonction que
     build_optimized_config/GridTradingController/run, réutilisées telles quelles).
 
         état persisté valide ?
-            OUI -> reprise EXACTE, aucun MarketReader, aucune activation
-            NON -> optimisation 15 min -> validation -> activation ->
-                   persistance atomique (uniquement si ACTIVATED confirmé)
+            OUI -> reprise EXACTE, aucun MarketReader, aucune activation,
+                   allocated_capital_usdc ignoré s'il est fourni (déjà
+                   figé dans l'état persisté)
+            NON -> allocated_capital_usdc requis -> optimisation 15 min ->
+                   validation -> activation -> persistance atomique
+                   (uniquement si ACTIVATED confirmé)
 
     `inst_id` : instrument de cette instance -- transmis à build_optimized_config
     et à get_instrument, jamais codé en dur. Défaut "XRP-USDC" (INST_ID),
@@ -461,6 +525,10 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
     existants), utilisé tel quel, sans dérivation -- comportement antérieur
     strictement préservé.
 
+    `allocated_capital_usdc` : consigne d'allocation économique explicite,
+    requise UNIQUEMENT lorsqu'aucun état persisté valide n'existe (chemin
+    de création) -- jamais de repli sur le solde USDC du wallet.
+
     Retourne le code de sortie de main().
     """
     if state_path is None:
@@ -470,7 +538,7 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
     pending_path = pending_grid_state_path_for(inst_id)
     try:
         pending_config = load_grid_state(pending_path)
-    except LegacyGridStateWithoutQ as error:
+    except (LegacyGridStateWithoutQ, LegacyGridStateWithoutAllocatedCapital) as error:
         print(f"❌ {error}")
         print("\n========== SAFETY ==========")
         print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
@@ -478,7 +546,7 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
 
     # Une initialisation patrimoniale interrompue possède priorité sur
     # active_grid_state : on doit reprendre EXACTEMENT la même grille,
-    # jamais recalculer P0/GLL/GUL.
+    # jamais recalculer P0/GLL/GUL/allocated_capital.
     if pending_config is not None:
         config = pending_config
         print_grid_identity(config, instrument)
@@ -487,6 +555,12 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
             "Configuration pending valide -- aucun MarketReader, aucune "
             "optimisation, aucun recalcul de P0."
         )
+        if allocated_capital_usdc is not None:
+            print(
+                f"ℹ️  --allocated-capital-usdc fourni ({allocated_capital_usdc}) mais "
+                f"ignoré -- initialisation pending déjà figée avec "
+                f"allocated_capital={config.allocated_capital}."
+            )
 
         if not live:
             print("\n========== SAFETY ==========")
@@ -535,7 +609,7 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
 
     try:
         loaded_config = load_grid_state(state_path)
-    except LegacyGridStateWithoutQ as error:
+    except (LegacyGridStateWithoutQ, LegacyGridStateWithoutAllocatedCapital) as error:
         print(f"❌ {error}")
         print("\n========== SAFETY ==========")
         print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
@@ -546,6 +620,12 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
         print_grid_identity(config, instrument)
         print("\n========== REPRISE AUTOMATIQUE (persistance) ==========")
         print("Fichier d'état valide -- AUCUN MarketReader, AUCUNE optimisation, AUCUNE activation.")
+        if allocated_capital_usdc is not None:
+            print(
+                f"ℹ️  --allocated-capital-usdc fourni ({allocated_capital_usdc}) mais "
+                f"ignoré -- grille déjà active, allocated_capital chargé depuis "
+                f"l'état persisté ({config.allocated_capital})."
+            )
 
         if not live:
             print("\n========== SAFETY ==========")
@@ -559,8 +639,18 @@ def run_auto_mode(adapter, live: bool, inst_id: str = INST_ID, state_path: str |
         return 0
 
     print("Aucun état de grille persistée valide (absent ou invalide) -- création optimisée.")
+    if allocated_capital_usdc is None:
+        print(
+            "❌ --allocated-capital-usdc absent -- impossible de créer une "
+            "nouvelle grille sans capital explicitement alloué. Aucune "
+            "valeur par défaut (jamais le solde USDC du wallet)."
+        )
+        print("\n========== SAFETY ==========")
+        print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+        return 1
+
     try:
-        config = build_optimized_config(adapter, inst_id)
+        config = build_optimized_config(adapter, inst_id, allocated_capital_usdc=allocated_capital_usdc)
     except GridCreationRefused as error:
         print(f"❌ Création de grille refusée : {error}")
         print("\n========== SAFETY ==========")
@@ -604,6 +694,16 @@ class GridQNotFrozen(ValueError):
     d'appeler run()."""
 
 
+class GridAllocatedCapitalNotFrozen(ValueError):
+    """Levée par run() si config.allocated_capital est None -- la consigne
+    d'allocation économique de la grille n'a jamais été figée avant
+    l'entrée en boucle. Dans les chemins réels de ce module, q figé
+    implique déjà allocated_capital figé (build_optimized_config fige les
+    deux ensemble, load_grid_state exige les deux) -- cette garde reste
+    défensive contre un config construit à la main de façon incohérente,
+    jamais une valeur à deviner ici."""
+
+
 def run(
     adapter,
     config: PreflightConfig,
@@ -622,15 +722,22 @@ def run(
 
     Retourne le nombre de cycles réellement exécutés.
 
-    Lève GridQNotFrozen si config.q est None -- refuse de démarrer plutôt
-    que de laisser run_preflight recalculer q à chaque cycle depuis les
-    soldes courants.
+    Lève GridQNotFrozen si config.q est None, ou GridAllocatedCapitalNotFrozen
+    si config.allocated_capital est None -- refuse de démarrer plutôt que
+    de laisser run_preflight recalculer/deviner une identité économique
+    incomplète à chaque cycle depuis les soldes courants.
     """
     if config.q is None:
         raise GridQNotFrozen(
             "config.q est None : l'identité économique de cette grille n'a "
             "jamais été figée. run() refuse de démarrer plutôt que de "
             "recalculer q à partir des soldes courants à chaque cycle."
+        )
+    if config.allocated_capital is None:
+        raise GridAllocatedCapitalNotFrozen(
+            "config.allocated_capital est None : la consigne d'allocation "
+            "économique de cette grille n'a jamais été figée. run() refuse "
+            "de démarrer."
         )
     cycles_run = 0
     try:
@@ -660,7 +767,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--inst-id", dest="inst_id", default=INST_ID, help=f"Instrument à trader. Défaut : {INST_ID} (compatibilité stricte, comportement inchangé si non fourni).")
     parser.add_argument("--mode", choices=("resume", "create", "auto"), default="resume", help="resume (défaut, inchangé) = grille historique déjà active ; create = nouvelle grille via l'optimiseur ; auto = reprise depuis persistance si valide, sinon création optimisée (usage systemd).")
     parser.add_argument("--live", action="store_true", help="Entre réellement dans la boucle active. Absent = READ-ONLY, affiche l'identité puis s'arrête.")
+    parser.add_argument(
+        "--allocated-capital-usdc", dest="allocated_capital_usdc", default=None,
+        help="Consigne d'allocation économique : capital USDC nouvellement mis à disposition d'une "
+             "NOUVELLE grille, à l'exclusion de la valeur de tout token déjà détenu dans le wallet. "
+             "Requis pour --mode create. Requis pour --mode auto UNIQUEMENT lors d'une création "
+             "(aucun état persisté valide) -- ignoré, avec message explicite, si une grille est reprise "
+             "depuis l'état persisté. Aucune valeur par défaut (jamais le solde USDC du wallet).",
+    )
     return parser.parse_args()
+
+
+def _parse_allocated_capital_usdc(raw: str) -> Decimal:
+    """Parse strict de --allocated-capital-usdc -- jamais un repli sur une
+    valeur devinée en cas d'entrée invalide."""
+    try:
+        value = Decimal(raw)
+    except InvalidOperation:
+        raise ValueError(f"--allocated-capital-usdc invalide : {raw!r} n'est pas un nombre décimal") from None
+    if value <= 0:
+        raise ValueError("--allocated-capital-usdc doit être strictement positif")
+    return value
 
 
 def main() -> int:
@@ -669,12 +796,31 @@ def main() -> int:
 
     adapter = build_adapter(MODE)
 
+    allocated_capital_usdc = None
+    if args.allocated_capital_usdc is not None:
+        try:
+            allocated_capital_usdc = _parse_allocated_capital_usdc(args.allocated_capital_usdc)
+        except ValueError as error:
+            print(f"❌ {error}")
+            print("\n========== SAFETY ==========")
+            print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+            return 1
+
     if args.mode == "auto":
-        return run_auto_mode(adapter, args.live, inst_id=args.inst_id)
+        return run_auto_mode(adapter, args.live, inst_id=args.inst_id, allocated_capital_usdc=allocated_capital_usdc)
 
     if args.mode == "create":
+        if allocated_capital_usdc is None:
+            print(
+                "❌ --mode create requiert --allocated-capital-usdc (capital USDC "
+                "explicitement alloué à cette nouvelle grille). Aucune valeur par "
+                "défaut (jamais le solde USDC du wallet)."
+            )
+            print("\n========== SAFETY ==========")
+            print("READ ONLY\nNO ORDER PLACED\nNO ORDER CANCELLED\nNO ORDER MODIFIED")
+            return 1
         try:
-            config = build_optimized_config(adapter, args.inst_id)
+            config = build_optimized_config(adapter, args.inst_id, allocated_capital_usdc=allocated_capital_usdc)
         except GridCreationRefused as error:
             print(f"❌ Création de grille refusée : {error}")
             print("\n========== SAFETY ==========")

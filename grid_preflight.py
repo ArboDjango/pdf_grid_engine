@@ -45,6 +45,15 @@ class PreflightConfig:
     # à partir des soldes courants -- l'appelant (run_active_grid.py) est seul
     # responsable de figer cette valeur avant toute persistance ou boucle.
     q: Decimal | None = None
+    # Consigne d'allocation économique de la grille -- capital USDC
+    # explicitement mis à disposition de CETTE grille par l'opérateur (ou un
+    # futur MetaController), à l'exclusion de la valeur de tout token déjà
+    # détenu dans le wallet. Ce n'est jamais un compte séparé du wallet réel
+    # -- seulement le montant que le calcul de q doit considérer comme sien.
+    # None : repli sur l'ancien calcul alpha × patrimoine total (tokens
+    # déjà détenus inclus) -- comportement historique préservé pour tout
+    # PreflightConfig qui n'adopte pas ce mécanisme.
+    allocated_capital: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +114,15 @@ def run_preflight(source: OkxPreflightSource, config: PreflightConfig) -> Prefli
     _validate_final_trellis(trellis, config.p0, instrument.tick_size)
 
     total_capital = balances.quote_total + balances.base_total * config.p0
-    allocated_capital = config.alpha * total_capital
+    if config.allocated_capital is None:
+        # Legacy : patrimoine total du wallet (tokens déjà détenus inclus),
+        # comportement historique inchangé.
+        allocated_capital = config.alpha * total_capital
+    else:
+        # Consigne d'allocation explicite -- capital USDC nouvellement mis
+        # à disposition de CETTE grille UNIQUEMENT, jamais additionné à la
+        # valeur de tokens déjà détenus (base_total exclu de ce calcul).
+        allocated_capital = config.allocated_capital
     lower_levels = trellis[:config.nl]
     denominator = Decimal(config.nu) * config.p0 + sum(lower_levels, Decimal("0"))
     q_raw = allocated_capital / denominator
@@ -148,6 +165,8 @@ def format_report(report: PreflightReport) -> str:
         f"Contraintes: tick={report.instrument.tick_size} lot={report.instrument.lot_size} min_size={report.instrument.min_size} min_notional={report.instrument.min_notional}",
         f"Frais: maker={report.fees.maker} taker={report.fees.taker}",
         f"Patrimoine: base={report.balances.base_total} quote={report.balances.quote_total} F_total={report.total_capital}",
+        f"Capital alloué={report.allocated_capital} (source="
+        f"{'explicite --allocated-capital-usdc' if report.config.allocated_capital is not None else 'alpha × patrimoine total (legacy)'})",
         f"P0={report.config.p0} niveaux={report.config.nl + report.config.nu} treillis={', '.join(map(str, report.trellis))}",
         f"q brut={report.q_raw} q final={report.q}",
         f"Couverture: spot {report.required_spot} ({report.spot_covered}), cash {report.required_cash} ({report.cash_covered})",
@@ -174,6 +193,8 @@ def _validate_config(config: PreflightConfig) -> None:
         raise PreflightError("operational_margin doit être positif ou nul")
     if config.q is not None and config.q <= Decimal("0"):
         raise PreflightError("q figé doit être strictement positif")
+    if config.allocated_capital is not None and config.allocated_capital <= Decimal("0"):
+        raise PreflightError("allocated_capital doit être strictement positif")
 
 
 def _validate_final_trellis(trellis: tuple[Decimal, ...], p0: Decimal, tick_size: Decimal) -> None:

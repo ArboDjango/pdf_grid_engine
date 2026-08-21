@@ -250,7 +250,7 @@ class TestNoRebuildNoInitialActivation:
         activation_calls = []
         from grid_trading_controller import GridTradingController
         monkeypatch.setattr(GridTradingController, "run", lambda self, *a, **k: activation_calls.append(1))
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create"])  # sans --live
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--allocated-capital-usdc", "200"])  # sans --live
 
         exit_code = run_active_grid.main()
 
@@ -275,7 +275,7 @@ class TestNoRebuildNoInitialActivation:
         original_loop = run_active_grid.run
         monkeypatch.setattr(run_active_grid, "run", lambda adapter_arg, config, **k: original_loop(adapter_arg, config, max_cycles=1, sleep_fn=lambda s: None))
 
-        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live"])
+        monkeypatch.setattr(sys, "argv", ["run_active_grid.py", "--mode", "create", "--live", "--allocated-capital-usdc", "200"])
 
         run_active_grid.main()
 
@@ -303,7 +303,7 @@ class TestConfigAndTrellisInvariance:
     def test_g_two_successive_run_preflight_use_exact_same_config(self, fake_adapter):
         # build_historical_config() ne fige jamais q (--mode resume, non
         # utilisé en production H24) -- run() l'exige désormais figé.
-        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"))
+        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"), allocated_capital=Decimal("20000"))
         config_id = id(config)
 
         run_active_grid.run(fake_adapter, config, max_cycles=2, sleep_fn=lambda s: None)
@@ -331,7 +331,7 @@ class TestRealScenarioTieBreak:
         # build_historical_config() ne fige jamais q (--mode resume, non
         # utilisé en production H24) -- run() l'exige désormais figé ;
         # 21.044 correspond à la quantité historique réelle de ce scénario.
-        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"))
+        config = replace(run_active_grid.build_historical_config(fake_adapter, "XRP-USDC"), q=Decimal("21.044"), allocated_capital=Decimal("20000"))
         report = run_preflight(fake_adapter, config)
 
         lower_levels = sorted(float(g) for g in report.trellis if float(g) < float(config.p0))
