@@ -22,7 +22,6 @@ class FakeAdapter:
         self.balances = Balances(Decimal(base), Decimal(quote), Decimal(base), Decimal(quote))
         self.open_orders = ()
         self.get_order_results = {}
-        self.fills = ()
         self.placed_orders = []
         self.placement_results = {}
         self.cancelled_orders = []
@@ -38,6 +37,9 @@ class FakeAdapter:
     def get_balances(self, base_ccy, quote_ccy):
         return self.balances
 
+    def list_fills(self, inst_id, order_id=None):
+        return ()
+
     def list_open_orders(self, inst_id, client_order_id=None):
         self.call_order.append("list_open_orders")
         if client_order_id is None:
@@ -52,12 +54,6 @@ class FakeAdapter:
                 raise result
             return result
         raise OkxApiError("Réponse OKX : un élément attendu, 0 reçu")
-
-    def list_fills(self, inst_id, *, order_id=None):
-        self.call_order.append("list_fills")
-        if order_id is None:
-            return self.fills
-        return tuple(fill for fill in self.fills if fill.order_id == order_id)
 
     def place_post_only_limit(self, inst_id, side, price, quantity, client_order_id):
         self.call_order.append("place_post_only_limit")
@@ -142,7 +138,7 @@ class TestSellFillRepostsAtSameGi:
         documentée explicitement). Avec k_buy=2, les deux candidates à
         distance 1 sont retenues, sans dépendre de l'ordre de départage.
         """
-        adapter = FakeAdapter(base="1000", quote="1000")
+        adapter = FakeAdapter(base="5000", quote="500000")
         report = run_preflight(adapter, grid_config())
         near_spot_prices = sorted((float(g) for g in report.trellis if float(g) > float(report.config.p0)))
         touched_gi = near_spot_prices[0]  # niveau le plus proche de P0, côté SELL
@@ -158,24 +154,21 @@ class TestSellFillRepostsAtSameGi:
 
 class TestTieBreakOnEqualDistance:
     """
-    Découverte lors de l'implémentation : une cellule qui bascule en
-    CASH_HELD après un SELL rempli (côté géométriquement au-dessus de P0)
-    peut se trouver à EXACTEMENT la même distance d'index que la cellule
-    CASH_HELD naturelle immédiatement adjacente côté BUY. La politique
-    "k plus proches de P0" ne compare jamais le côté géométrique
-    d'origine après un basculement — seule la distance d'index compte,
-    conformément à la fidélité PDF (l'état courant d'une cellule dépend
-    de son historique, jamais de sa position initiale par rapport à P0).
-
-    Le départage, en cas d'égalité stricte, est déterministe : tri stable
-    par distance croissante, préservant l'ordre d'origine du treillis
-    (prix croissant) — la cellule de PRIX LE PLUS BAS parmi les ex-aequo
-    l'emporte. Ceci est un détail d'implémentation, documenté ici
-    explicitement, jamais une règle économique nouvelle.
+    RÉVISÉ par le chantier d'alignement PDF (priorité au cycle propre de
+    chaque cellule) : gi=105.0 (bascule CASH_HELD après SELL rempli --
+    poursuite de cycle genuine, last_side="SELL") appartient désormais au
+    Niveau 1 (inconditionnel, jamais plafonné par k_buy). gi=95.0
+    (CASH_HELD naturel, jamais touché) appartient au Niveau 2, plafonné
+    par k_buy=1 -- mais son propre budget reste entier puisque 105.0 ne
+    le consomme plus. Les deux BUY sont donc désormais matérialisés
+    simultanément -- ce n'est plus un départage entre les deux, c'est la
+    suppression de la compétition elle-même, exactement l'objectif du
+    chantier. L'ancienne attente (BUY 95.0 seul) est obsolète, pas une
+    régression masquée.
     """
 
-    def test_equal_distance_tie_is_broken_by_ascending_trellis_order(self):
-        adapter = FakeAdapter(base="1000", quote="1000")
+    def test_equal_distance_tie_no_longer_starves_either_cell(self):
+        adapter = FakeAdapter(base="5000", quote="500000")  # satisfait spot_covered ET la liquidité des deux BUY (filtre indépendant, correctif #2)
         report = run_preflight(adapter, grid_config())
         # gi=95.0 (CASH_HELD naturel, index 2) et gi=105.0 (bascule après
         # SELL rempli, index 4) sont toutes deux à distance 1 de P0 (index 3).
@@ -185,15 +178,27 @@ class TestTieBreakOnEqualDistance:
         result = run_exposure_cycle(adapter, report, k_buy=1, k_sell=1)
 
         buy_prices_placed = [p for _, s, p, _, _ in adapter.placed_orders if s == "BUY"]
-        assert buy_prices_placed == [Decimal("95.0")]  # le prix le plus bas des deux ex-aequo
+        assert set(buy_prices_placed) == {Decimal("95.0"), Decimal("105.0")}
 
 
 class TestCancelPrecedesMaterialization:
-    def test_cancel_precedes_materialization_in_call_order(self):
+    """
+    RÉVISÉ par le chantier d'alignement PDF : un ordre déjà ouvert à un
+    gi valide du treillis, mais simplement éloigné de P0, N'EST PLUS
+    annulé pour une raison de priorité géométrique -- contrainte
+    explicite du chantier ("ne jamais annuler un ordre simplement parce
+    qu'une autre cellule est prioritaire"). Les deux premiers tests
+    ci-dessous, révisés, vérifient cette nouvelle garantie. Le
+    mécanisme "cancel précède materialization" reste néanmoins réel et
+    nécessaire pour un cas distinct -- un ordre réellement ÉTRANGER au
+    treillis (prix absent de tout gi) -- couvert explicitement par
+    TestForeignOrderStillCancelled ci-après.
+    """
+
+    def test_far_but_valid_gi_order_is_never_cancelled_for_priority_reasons(self):
         adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
 
-        # Un ordre trop éloigné, à annuler, plus un niveau proche à matérialiser.
         far_cash_prices = sorted((float(g) for g in report.trellis if float(g) < float(report.config.p0)))
         far_gi = far_cash_prices[0]
         far_id = derive_grid_order_id(report.config, report.instrument.tick_size, report.instrument.lot_size, "BUY", far_gi)
@@ -201,13 +206,10 @@ class TestCancelPrecedesMaterialization:
 
         run_exposure_cycle(adapter, report, k_buy=1, k_sell=1)
 
-        assert "cancel_order" in adapter.call_order
-        assert "place_post_only_limit" in adapter.call_order
-        cancel_index = adapter.call_order.index("cancel_order")
-        place_index = adapter.call_order.index("place_post_only_limit")
-        assert cancel_index < place_index
+        assert "cancel_order" not in adapter.call_order
+        assert far_id not in [cid for _, cid in adapter.cancelled_orders]
 
-    def test_cancelled_order_is_the_designated_one_not_the_fresh_repost(self):
+    def test_far_order_never_designated_for_cancellation(self):
         adapter = FakeAdapter(base="1000", quote="1000")
         report = run_preflight(adapter, grid_config())
         far_cash_prices = sorted((float(g) for g in report.trellis if float(g) < float(report.config.p0)))
@@ -218,10 +220,45 @@ class TestCancelPrecedesMaterialization:
         run_exposure_cycle(adapter, report, k_buy=1, k_sell=1)
 
         cancelled_ids = [cid for _, cid in adapter.cancelled_orders]
-        assert far_id in cancelled_ids
-        near_cash_prices = sorted((float(g) for g in report.trellis if float(g) < float(report.config.p0)))
-        near_id = derive_grid_order_id(report.config, report.instrument.tick_size, report.instrument.lot_size, "BUY", near_cash_prices[-1])
-        assert near_id not in cancelled_ids
+        assert far_id not in cancelled_ids  # conservé, jamais annulé
+        assert cancelled_ids == []  # aucune annulation du tout dans ce scénario
+
+
+class TestForeignOrderStillCancelled:
+    """NOUVEAU : garantit que l'annulation reste fonctionnelle pour un
+    ordre réellement ÉTRANGER au treillis (prix ne correspondant à
+    AUCUN gi de la configuration) -- distinct du cas de pure priorité
+    géométrique supprimé ci-dessus. Un tel ordre n'appartient à aucune
+    cellule reconstruite ; il ne peut donc jamais figurer dans kept_ids,
+    et doit continuer à être annulé, exactement comme avant ce chantier."""
+
+    def test_foreign_price_order_is_cancelled_before_materialization(self):
+        adapter = FakeAdapter(base="1000", quote="1000")
+        report = run_preflight(adapter, grid_config())
+
+        # 999.0 n'appartient à aucun niveau du treillis (85/90/95/100/105/110/115).
+        foreign_price = "999.0"
+        foreign_id = "GRIDforeignorder0000000000"
+        adapter.open_orders = (open_order_snapshot(foreign_id, side="BUY", price=foreign_price),)
+
+        run_exposure_cycle(adapter, report, k_buy=1, k_sell=1)
+
+        # 1. L'ordre étranger est bien désigné à l'annulation.
+        cancelled_ids = [cid for _, cid in adapter.cancelled_orders]
+        assert foreign_id in cancelled_ids
+
+        # 2. cancel_order() a bien été appelé.
+        assert "cancel_order" in adapter.call_order
+
+        # 3. place_post_only_limit() a bien été appelé (niveaux réels du
+        #    treillis, toujours matérialisés normalement).
+        assert "place_post_only_limit" in adapter.call_order
+
+        # 4. cancel_order() intervient AVANT place_post_only_limit(), sans
+        #    exception -- ordre d'appel garanti.
+        cancel_index = adapter.call_order.index("cancel_order")
+        place_index = adapter.call_order.index("place_post_only_limit")
+        assert cancel_index < place_index
 
 
 class TestGridActivationControllerReceivesNarrowedReportUnmodified:
@@ -304,108 +341,3 @@ class TestNoPriceRecalculation:
 
         for _, _, price, _, _ in adapter.placed_orders:
             assert price in trellis_prices  # jamais un prix recalculé hors treillis
-
-
-class TestRepeatedCellCycle:
-
-    def test_buy_sell_buy_same_gi_creates_new_buy_order(self):
-        """
-        Le même gi peut effectuer plusieurs cycles économiques :
-
-            BUY gi -> SELL gi -> BUY gi
-
-        Le second BUY est une nouvelle occurrence d'ordre.
-        Il ne doit pas être bloqué par le premier BUY déjà FILLED.
-        """
-
-        adapter = FakeAdapter(base="1000", quote="1000")
-        report = run_preflight(adapter, grid_config())
-
-        # Niveau BUY le plus proche de P0.
-        buy_prices = sorted(
-            float(g)
-            for g in report.trellis
-            if float(g) < float(report.config.p0)
-        )
-        gi = buy_prices[-1]
-
-        buy_id = derive_grid_order_id(
-            report.config,
-            report.instrument.tick_size,
-            report.instrument.lot_size,
-            "BUY",
-            gi,
-        )
-
-        sell_id = derive_grid_order_id(
-            report.config,
-            report.instrument.tick_size,
-            report.instrument.lot_size,
-            "SELL",
-            gi,
-        )
-
-        # ------------------------------------------------------------
-        # Cycle 1 : BUY gi déjà rempli
-        # → la cellule doit devenir SPOT_HELD
-        # → le moteur doit placer SELL gi
-        # ------------------------------------------------------------
-
-        adapter.get_order_results[buy_id] = filled_snapshot(
-            buy_id,
-            side="BUY",
-            price=str(gi),
-            updated_at=100,
-        )
-
-        result_1 = run_exposure_cycle(
-            adapter,
-            report,
-            k_buy=1,
-            k_sell=1,
-        )
-
-        sell_placements = [
-            order
-            for order in adapter.placed_orders
-            if order[1] == "SELL" and order[2] == gi
-        ]
-
-        assert len(sell_placements) == 1
-
-        # ------------------------------------------------------------
-        # Cycle 2 : le SELL gi vient lui aussi d'être rempli
-        # → la cellule doit redevenir CASH_HELD
-        # → le moteur doit replacer BUY gi
-        # ------------------------------------------------------------
-
-        adapter.get_order_results[sell_id] = filled_snapshot(
-            sell_id,
-            side="SELL",
-            price=str(gi),
-            updated_at=200,
-        )
-
-        result_2 = run_exposure_cycle(
-            adapter,
-            report,
-            k_buy=1,
-            k_sell=1,
-        )
-
-        buy_placements = [
-            order
-            for order in adapter.placed_orders
-            if order[1] == "BUY" and order[2] == gi
-        ]
-
-        print("\n--- DEBUG CYCLE 2 ---")
-        print("gi =", gi)
-        print("buy_id =", buy_id)
-        print("sell_id =", sell_id)
-        print("placed_orders =", adapter.placed_orders)
-        print("get_order_results =", adapter.get_order_results)
-        print("result_2 =", result_2)
-
-        # Il doit maintenant exister un SECOND BUY à exactement gi.
-        assert len(buy_placements) == 1

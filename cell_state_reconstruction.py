@@ -83,7 +83,25 @@ def reconstruct_cell_states(
         fill
         for fill in fills
         if _belongs_to_this_grid(fill, report)
-        and fill.order_state == "filled"
+        # NOTE : aucune condition sur fill.order_state ici.
+        #
+        # GET /api/v5/trade/fills ne contient structurellement JAMAIS de
+        # champ "state" -- confirmé sur la documentation officielle OKX
+        # (schéma réel : instType, instId, tradeId, ordId, clOrdId,
+        # billId, tag, fillPx, fillSz, side, posSide, execType, feeCcy,
+        # fee, ts). "state" appartient exclusivement à GET
+        # /api/v5/trade/order (niveau ordre), jamais à /trade/fills
+        # (niveau exécution). La présence même d'un enregistrement dans
+        # list_fills() CONSTITUE déjà la preuve d'exécution -- il n'existe
+        # pas de "fill non exécuté" retourné par cet endpoint.
+        #
+        # L'ancienne condition `and fill.order_state == "filled"` reposait
+        # sur une hypothèse de contrat erronée : Fill.order_state, dérivé
+        # de item.get("state", "") dans okx_spot_adapter.py::_fill, vaut
+        # toujours "" pour un fill réel -- rendant cette voie de
+        # reconstruction structurellement inatteignable en production,
+        # confirmé concrètement sur un BUY XRP-USDC réel exécuté à 0.9877
+        # (tradeId=838447), jamais reconnu avant ce correctif.
     )
 
     cells: list[CellReconstruction] = []

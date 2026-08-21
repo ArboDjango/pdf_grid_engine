@@ -106,6 +106,7 @@ class GridActivationController:
         adapter,
         report: PreflightReport,
         order_ids: dict[OrderInstruction, str] | None = None,
+        require_spot_coverage: bool = True,
     ) -> GridActivationResult:
         """Sonde, vérifie, puis place les niveaux manquants.
 
@@ -136,7 +137,7 @@ class GridActivationController:
         d'aucun appelant externe (ex. GridTradingController) : elle est
         vraie quel que soit le point d'entrée utilisé pour appeler run().
         """
-        if not report.spot_covered:
+        if require_spot_coverage and not report.spot_covered:
             return GridActivationResult(
                 GridActivationState.ERROR, (), (), (), (),
                 "activation refusée : report.spot_covered=False — "
@@ -222,9 +223,11 @@ class GridActivationController:
                 # transport : la boucle s'arrête immédiatement, sans tenter les
                 # niveaux suivants. L'état accumulé jusqu'ici (already_open,
                 # already_filled, placed, failed) est préservé pour diagnostic.
+                data = getattr(error, "data", None)
                 return GridActivationResult(
                     GridActivationState.ERROR, tuple(already_open), tuple(already_filled), tuple(placed), tuple(failed),
-                    f"placement a échoué (niveau {derived_id}) : {error}",
+                    f"placement a échoué (niveau {derived_id}) : {error}"
+                    + (f" — data OKX : {data}" if data else ""),
                 )
             if result.accepted:
                 placed.append(instruction)

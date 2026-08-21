@@ -26,7 +26,26 @@ SELL = "SELL"
 
 
 class OkxApiError(RuntimeError):
-    """Réponse API OKX invalide ou erreur globale OKX."""
+    """Réponse API OKX invalide ou erreur globale OKX.
+
+    Attributes:
+        data: Le contenu de response["data"] au moment de l'erreur, si la
+            réponse OKX en portait un (ex. le tableau contenant
+            sCode/sMsg par item, pour un rejet de POST /api/v5/trade/order
+            dont l'enveloppe globale indique déjà code != "0"). None si
+            l'erreur ne provient pas d'une réponse OKX exploitable (ex.
+            erreur de parsing locale) -- jamais recalculé, jamais deviné,
+            transporte exactement ce qu'OKX a retourné, ou rien.
+
+            Rétrocompatible : ce paramètre est optionnel (défaut None) et
+            n'affecte ni str(error) ni error.args -- tout code existant
+            qui catch OkxApiError et n'utilise que le message continue de
+            fonctionner à l'identique.
+    """
+
+    def __init__(self, message: str, data: Any = None) -> None:
+        super().__init__(message)
+        self.data = data
 
 
 class RestTransport(Protocol):
@@ -120,7 +139,7 @@ class Fill:
     side: str
     fill_price: Decimal
     fill_quantity: Decimal
-    accumulated_fill_quantity: Decimal
+    accumulated_fill_quantity: Decimal | None
     order_state: str
     filled_at: int | None
     fee: Decimal | None
@@ -134,6 +153,29 @@ class Ticker:
     inst_id: str
     last: Decimal
     ts: int
+
+
+@dataclass(frozen=True)
+class PriceLimit:
+    """Bande de prix dynamique OKX -- distincte de InstrumentRules (statique)
+    et de Balances. Recalculée en continu par OKX (index + prime moyenne
+    sur 1 minute), jamais mise en cache au-delà d'un appel."""
+    inst_id: str
+    buy_lmt: Decimal
+    sell_lmt: Decimal
+    ts: int
+
+
+@dataclass(frozen=True)
+class Candle:
+    """Une bougie OKX publique. Miroir fidèle de la ligne brute
+    [ts, o, h, l, c, vol, ...] retournée par GET /api/v5/market/candles."""
+    ts: int
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
 
 
 @dataclass(frozen=True)
@@ -247,6 +289,42 @@ class OkxSpotAdapter:
         item = data[0]
         return Ticker(inst_id=item.get("instId", inst_id), last=_required_decimal(item, "last"), ts=_required_timestamp(item, "ts"))
 
+    def get_price_limit(self, inst_id: str) -> PriceLimit:
+        """Lit la bande de prix dynamique OKX. Endpoint public : aucune signature envoyée.
+
+        Distinct de InstrumentRules (statique) et de Balances -- recalculé
+        en continu par OKX (index + prime, cf. documentation officielle),
+        jamais mis en cache au-delà d'un appel."""
+        response = self._transport("GET", "/api/v5/public/price-limit", {"instId": inst_id}, None, {})
+        if response.get("code") != "0":
+            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}")
+        data = response.get("data", [])
+        if len(data) != 1:
+            raise OkxApiError(f"Réponse OKX : un élément attendu, {len(data)} reçu")
+        item = data[0]
+        return PriceLimit(
+            inst_id=item.get("instId", inst_id),
+            buy_lmt=_required_decimal(item, "buyLmt"),
+            sell_lmt=_required_decimal(item, "sellLmt"),
+            ts=_required_timestamp(item, "ts"),
+        )
+
+    def get_klines(self, inst_id: str, bar: str = "15m", limit: int = 50) -> tuple[Candle, ...]:
+        """Lit des bougies publiques OKX. Endpoint public : aucune signature envoyée.
+
+        Lecture ponctuelle — aucun stockage, aucun historique conservé par
+        cette méthode au-delà de l'appel. L'ordre de retour d'OKX
+        (antichronologique, la plus récente en premier) n'est jamais
+        normalisé ici — c'est la responsabilité de l'appelant (voir
+        market_reader.py), pour que cette méthode reste un miroir fidèle
+        de la réponse brute, sans decision implicite sur l'ordre attendu.
+        """
+        response = self._transport("GET", "/api/v5/market/candles", {"instId": inst_id, "bar": bar, "limit": str(limit)}, None, {})
+        if response.get("code") != "0":
+            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}")
+        rows = response.get("data", [])
+        return tuple(_candle(row) for row in rows)
+
     def place_post_only_limit(self, inst_id: str, side: str, price: Decimal, quantity: Decimal, client_order_id: str) -> PlacementResult:
         payload = {"instId": inst_id, "tdMode": "cash", "side": _to_okx_side(side), "ordType": "post_only", "px": str(price), "sz": str(quantity), "clOrdId": client_order_id}
         item = self._one("POST", "/api/v5/trade/order", body=payload, allow_item_error=True)
@@ -340,7 +418,7 @@ class OkxSpotAdapter:
             headers["x-simulated-trading"] = "1"
         response = self._transport(method, path, params, body, headers)
         if response.get("code") != "0":
-            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}")
+            raise OkxApiError(f"Erreur OKX {response.get('code')}: {response.get('msg')}", data=response.get("data"))
         return response
 
     def _ws_login(self) -> Mapping[str, str]:
@@ -421,6 +499,23 @@ def _optional_int(value: Any) -> int | None:
     return None if value in (None, "") else int(str(value))
 
 
+def _candle(row: Sequence[Any]) -> "Candle":
+    """Parse une ligne brute [ts, o, h, l, c, vol, ...] de GET /api/v5/market/candles."""
+    if len(row) < 6:
+        raise OkxApiError(f"Ligne de bougie OKX incomplète : {row!r}")
+    ts = _timestamp(row[0])
+    if ts is None:
+        raise OkxApiError(f"Horodatage de bougie OKX absent : {row!r}")
+    return Candle(
+        ts=ts,
+        open=_decimal(row[1]),
+        high=_decimal(row[2]),
+        low=_decimal(row[3]),
+        close=_decimal(row[4]),
+        volume=_decimal(row[5]),
+    )
+
+
 def _to_okx_side(side: str) -> str:
     if side == BUY:
         return "buy"
@@ -448,4 +543,4 @@ def _order(item: Mapping[str, Any]) -> OrderSnapshot:
 
 
 def _fill(item: Mapping[str, Any]) -> Fill:
-    return Fill(item["tradeId"], item["ordId"], item.get("clOrdId", ""), item["instId"], _side(item["side"]), _required_decimal(item, "fillPx"), _required_decimal(item, "fillSz"), _required_decimal(item, "accFillSz"), item.get("state", ""), _timestamp(item.get("fillTime")), _decimal(item.get("fee"), optional=True), item.get("feeCcy") or None, _decimal(item.get("rebate"), optional=True), item.get("rebateCcy") or None)
+    return Fill(item["tradeId"], item["ordId"], item.get("clOrdId", ""), item["instId"], _side(item["side"]), _required_decimal(item, "fillPx"), _required_decimal(item, "fillSz"), _decimal(item.get("accFillSz"), optional=True), item.get("state", ""), _timestamp(item.get("fillTime")), _decimal(item.get("fee"), optional=True), item.get("feeCcy") or None, _decimal(item.get("rebate"), optional=True), item.get("rebateCcy") or None)

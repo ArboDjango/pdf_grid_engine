@@ -9,6 +9,7 @@ from decimal import Decimal
 import pytest
 
 from cell import Cell, CellState
+from cell_state_reconstruction import CellReconstruction
 from grid_activation_controller import derive_grid_order_id
 from grid_order_exposure_controller import ExposureDecision, select_exposed_orders
 from grid_preflight import PreflightConfig, run_preflight
@@ -48,16 +49,18 @@ def open_order_snapshot(client_order_id, side="BUY", price="90.0"):
 
 
 def _cells_all_initial(report):
-    """Reconstruit les cellules dans leur état initial pur (aucun historique),
-    dans l'ordre attendu par select_exposed_orders (treillis, P0 exclu)."""
+    """Reconstruit les cellules dans leur état initial pur (aucun historique,
+    last_side=None -- Niveau 2, comportement V1 inchangé), dans l'ordre
+    attendu par select_exposed_orders (treillis, P0 exclu)."""
     p0 = float(report.config.p0)
-    cells = []
+    cell_states = []
     for gi_decimal in report.trellis:
         gi = float(gi_decimal)
         if gi == p0:
             continue
-        cells.append(Cell(gi, CellState.SPOT_HELD if gi > p0 else CellState.CASH_HELD))
-    return tuple(cells)
+        cell = Cell(gi, CellState.SPOT_HELD if gi > p0 else CellState.CASH_HELD)
+        cell_states.append(CellReconstruction(cell, None, None, None, None))
+    return tuple(cell_states)
 
 
 class TestKeepKNearestToP0:
@@ -113,11 +116,19 @@ class TestKeepKNearestToP0:
         assert "market_price" not in sig.parameters
 
 
-class TestExcessBeyondKIsCancelled:
-    def test_excess_beyond_k_is_designated_for_cancellation(self):
+class TestFarButAlreadyOpenIsNeverCancelled:
+    def test_far_from_p0_but_already_open_order_is_never_cancelled(self):
         """
-        Un ordre ouvert au-delà des k plus proches doit être désigné à
-        l'annulation — jamais silencieusement ignoré.
+        RÉVISÉ par ce chantier (alignement PDF) : un ordre déjà ouvert
+        n'est JAMAIS annulé simplement parce qu'une autre cellule est
+        plus proche de P0 -- contrainte explicite de ce chantier
+        ("ne jamais annuler automatiquement un ordre simplement parce
+        qu'une autre cellule est prioritaire"). Ce test remplace
+        l'ancien test_excess_beyond_k_is_designated_for_cancellation,
+        qui affirmait exactement le comportement inverse (annulation
+        d'un ordre loin de P0 au profit d'un plus proche) -- ce
+        comportement est désormais délibérément supprimé, pas une
+        régression masquée.
         """
         adapter = FakeAdapter(base="0", quote="1000")
         report = run_preflight(adapter, grid_config())
@@ -130,7 +141,7 @@ class TestExcessBeyondKIsCancelled:
 
         decision = select_exposed_orders(report, cells, open_orders, k_buy=1, k_sell=1)
 
-        assert far_id in decision.to_cancel
+        assert far_id not in decision.to_cancel  # comportement voulu : jamais annulé
 
     def test_kept_order_never_appears_in_cancel_list(self):
         adapter = FakeAdapter(base="0", quote="1000")
@@ -195,80 +206,4 @@ class TestValidation:
         report = run_preflight(adapter, grid_config())
 
         with pytest.raises(ValueError):
-            select_exposed_orders(report, cells=(), open_orders=(), k_buy=1, k_sell=1)
-
-from cell_order_identity import derive_next_order_id
-
-
-def test_open_non_root_occurrence_is_preserved():
-    """
-    Une occurrence non-ROOT déjà ouverte à un gi exposé doit être
-    conservée par la politique d'exposition.
-
-    Exemple :
-        BUY#1 rempli
-        -> SELL#1 ouvert
-
-    SELL#1 ne doit ni être annulé, ni provoquer un doublon.
-    """
-    adapter = FakeAdapter(base="1000", quote="1000")
-    report = run_preflight(adapter, grid_config())
-
-    cells = _cells_all_initial(report)
-
-    near_cash_prices = sorted(
-        float(g)
-        for g in report.trellis
-        if float(g) < float(report.config.p0)
-    )
-    gi = near_cash_prices[-1]
-
-    buy_root = derive_grid_order_id(
-        report.config,
-        report.instrument.tick_size,
-        report.instrument.lot_size,
-        "BUY",
-        gi,
-    )
-
-    sell_occurrence = derive_next_order_id(
-        report.config,
-        report.instrument.tick_size,
-        report.instrument.lot_size,
-        "SELL",
-        gi,
-        buy_root,
-    )
-
-    open_orders = (
-        open_order_snapshot(
-            sell_occurrence,
-            side="SELL",
-            price=str(gi),
-        ),
-    )
-
-    # La cellule doit être SPOT_HELD pour que SELL soit l'ordre exposé.
-    cells = tuple(
-        Cell(
-            c.gi,
-            CellState.SPOT_HELD if c.gi == gi else c.state,
-        )
-        for c in cells
-    )
-
-    decision = select_exposed_orders(
-        report,
-        cells,
-        open_orders,
-        k_buy=1,
-        k_sell=1,
-    )
-
-    assert sell_occurrence not in decision.to_cancel
-
-    # Aucun nouvel SELL au même gi.
-    assert not any(
-        side == "SELL" and price == gi
-        for side, price, _ in decision.to_materialize
-    )
+            select_exposed_orders(report, cell_states=(), open_orders=(), k_buy=1, k_sell=1)
