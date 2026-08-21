@@ -7,3 +7,6 @@ venv/
 htmlcov/
 .idea/
 .vscode/
+
+# Runtime state (never commit live grid state)
+active_grid_state_*.json
