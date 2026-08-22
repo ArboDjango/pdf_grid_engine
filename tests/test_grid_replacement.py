@@ -13,13 +13,14 @@ from decimal import Decimal
 import pytest
 
 import grid_replacement
+import market_reader
 from grid_preflight import PreflightConfig, run_preflight
 from grid_trading_controller import GridTradingState
 from okx_spot_adapter import (
     Balances, Candle, CancelResult, FeeRates, InstrumentRules, OkxApiError,
     OrderSnapshot, PlacementResult, Ticker,
 )
-from trellis_calculator import GridGeometry
+from trellis_calculator import GridGeometry, TrellisCalculator
 
 
 def make_candles(closes):
@@ -438,3 +439,212 @@ class TestChurnProtectionInteraction:
 
         assert materialize is True
         assert churn_protection.load_churn_protection(path) == {}  # repart à zéro (règle 11)
+
+
+# =============================================================================
+# Solution C : dimensionnement de la nouvelle grille par les ressources
+# RÉELLEMENT disponibles (base_available/quote_available), jamais par une
+# estimation de patrimoine total (quote + base × prix courant).
+# =============================================================================
+
+
+def _expected_new_geometry(adapter, old_config, direction, instrument):
+    """Reproduit indépendamment P0_new/GUL_new/GLL_new/lower_levels --
+    mêmes formules PUBLIQUES que compute_new_config (TrellisCalculator,
+    market_reader, _atr_width_pct) -- jamais la logique de dimensionnement
+    de q elle-même (q_base/q_cash/min/arrondi), qui est ce que ces tests
+    vérifient. Même patron d'indépendance que test_6 (vérification ATR)."""
+    borne_old = old_config.gul if direction == "UP" else old_config.gll
+    p0_new = grid_replacement._round_down(borne_old, instrument.tick_size)
+    ticker = adapter.get_ticker(old_config.inst_id)
+    conditions = market_reader.read(adapter, old_config.inst_id)
+    sim = grid_replacement._atr_width_pct(conditions.atr_norm_15m, conditions.di_ratio_15m)
+    deplacement_pct = abs(float(ticker.last) - float(borne_old)) / float(borne_old)
+    if direction == "UP":
+        gul_pct = sim["gul_pct"] + deplacement_pct
+        gll_pct = sim["gll_pct"]
+    else:
+        gll_pct = sim["gll_pct"] + deplacement_pct
+        gul_pct = sim["gul_pct"]
+    gul = Decimal(str(float(p0_new) * (1 + gul_pct)))
+    gll = Decimal(str(float(p0_new) * (1 - gll_pct)))
+    fees = adapter.get_fee_rates(old_config.inst_id)
+    raw_trellis = TrellisCalculator().calculate(
+        float(gul), float(gll), old_config.nu, old_config.nl, float(p0_new),
+        old_config.geometry, float(abs(fees.maker)),
+    )
+    trellis = tuple(
+        p0_new if i == old_config.nl else grid_replacement._round_down(Decimal(str(v)), instrument.tick_size)
+        for i, v in enumerate(raw_trellis)
+    )
+    lower_levels = trellis[:old_config.nl]
+    return p0_new, sum(lower_levels, Decimal("0"))
+
+
+class TestSolutionCSizing:
+    def test_q_constrained_by_base_when_base_is_scarce(self, tmp_path):
+        """base_available rare, quote_available surabondant -- q_new doit
+        être exactement round_down(base_available/nu, lot_size), quel que
+        soit le côté cash."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.20", base="50", quote="1000000")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is not None
+        report = run_preflight(adapter, new_config)
+
+        expected_q = grid_replacement._round_down(Decimal("50") / Decimal(5), instrument.lot_size)
+        assert report.q == expected_q
+        assert report.required_spot <= Decimal("50")  # jamais au-delà du base réellement détenu
+        assert report.required_cash < Decimal("1000000")  # côté cash très large, jamais liant ici
+
+    def test_q_constrained_by_quote_when_quote_is_scarce(self, tmp_path):
+        """quote_available rare, base_available surabondant -- q_new doit
+        être exactement round_down(quote_available/sum(lower_levels), lot_size)."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.20", base="1000000", quote="50")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        _, sum_lower = _expected_new_geometry(adapter, config, "UP", instrument)
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is not None
+        report = run_preflight(adapter, new_config)
+
+        expected_q = grid_replacement._round_down(Decimal("50") / sum_lower, instrument.lot_size)
+        assert report.q == expected_q
+        assert report.required_cash <= Decimal("50")
+        assert report.required_spot < Decimal("1000000")
+
+    def test_q_uses_minimum_of_both_constraints(self, tmp_path):
+        """Cas réel XRP LIVE : base et quote tous deux significatifs mais
+        disproportionnés par rapport à la géométrie visée -- q_new doit
+        être le PLUS PETIT des deux bornes, et la grille résultante doit
+        être intégralement matérialisable sous les DEUX ressources."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.4374", base="313.496", quote="158.231")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        _, sum_lower = _expected_new_geometry(adapter, config, "UP", instrument)
+        q_base = Decimal("313.496") / Decimal(5)
+        q_cash = Decimal("158.231") / sum_lower
+        expected_q = grid_replacement._round_down(min(q_base, q_cash), instrument.lot_size)
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is not None
+        report = run_preflight(adapter, new_config)
+
+        assert report.q == expected_q
+        assert q_cash < q_base  # confirme que c'est bien le cash qui est liant ici (cas XRP réel)
+        assert report.required_spot <= Decimal("313.496")
+        assert report.required_cash <= Decimal("158.231")
+        assert report.spot_covered is True
+        assert report.cash_covered is True
+
+    def test_q_rounded_down_to_lot_size(self, tmp_path):
+        """base_available délibérément non multiple de nu*lot_size --
+        q_new doit être tronqué au lot_size, jamais arrondi au plus proche
+        ni laissé avec une précision excédentaire."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.20", base="313.4999", quote="1000000")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        raw_q_base = Decimal("313.4999") / Decimal(5)  # 62.69998 -- pas un multiple de 0.001
+        expected_q = grid_replacement._round_down(raw_q_base, instrument.lot_size)
+        assert expected_q == Decimal("62.699")  # troncature, jamais 62.700
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is not None
+        report = run_preflight(adapter, new_config)
+        assert report.q == expected_q
+
+    def test_refuses_reconstruction_when_q_below_min_size(self, tmp_path):
+        """base_available et quote_available tous deux dérisoires -- q_new
+        tombe sous min_size : la reconstruction doit être refusée
+        proprement (None), jamais une grille invalide activée."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.20", base="0.01", quote="0.01")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is None
+
+        # Bout en bout : run_replacement_check ne doit jamais activer une
+        # grille invalide -- reste bloqué en CANCELLING (config inchangée),
+        # jamais une exception qui interromprait run().
+        for _ in range(grid_replacement.REPLACEMENT_N):
+            result_config, materialize = grid_replacement.run_replacement_check(adapter, config, 1, 1, path)
+        state = grid_replacement.load_replacement_state(path)
+        assert state.lifecycle_status == "CANCELLING"
+        assert materialize is False
+        assert result_config == config
+        assert adapter.placed_orders == []  # aucun ordre de grille invalide envoyé
+
+    def test_old_grid_config_untouched_by_reconstruction(self, tmp_path):
+        """L'ancienne grille (q, allocated_capital, P0/GLL/GUL) ne doit
+        jamais être modifiée par le calcul de la nouvelle -- ni pendant le
+        calcul, ni après matérialisation (seule l'entrée d'historique
+        reflète l'ancienne identité, jamais une mutation en place)."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        original = replace(config)  # copie de valeur, pour comparaison après coup
+        adapter = FakeAdapter(ticker_price="1.20")
+
+        new_config, materialize = run_until_materialized(adapter, config, path)
+
+        assert materialize is True
+        assert config == original  # objet passé en entrée, strictement inchangé (dataclass frozen)
+        assert config.q == Decimal("21.044")
+        assert config.allocated_capital == Decimal("200")
+
+        history_path = str(tmp_path / "active_grid_state_XRP-USDC_history.jsonl")
+        with open(history_path) as f:
+            entries = [json.loads(line) for line in f if line.strip()]
+        assert Decimal(entries[-1]["q"]) == Decimal("21.044")
+        assert Decimal(entries[-1]["allocated_capital"]) == Decimal("200")
+
+    def test_new_grid_keeps_a_single_uniform_q(self, tmp_path):
+        """La nouvelle grille matérialisée doit utiliser EXACTEMENT le même
+        q pour tous ses niveaux -- conforme au modèle du PDF (une seule
+        taille d'ordre par grille), jamais une quantité par niveau."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.20")
+
+        new_config, materialize = run_until_materialized(adapter, config, path)
+        assert materialize is True
+
+        report = run_preflight(adapter, replace(new_config, q=None))
+        assert new_config.q == report.q
+        assert all(Decimal(str(quantity)) == report.q for _, _, quantity in report.orders)
+
+    def test_allocated_capital_new_excludes_unrealized_base_value(self, tmp_path):
+        """allocated_capital_new ne doit plus jamais correspondre à
+        quote_available + base_available × prix courant (la plus-value
+        latente convertie en capital fictif) -- doit être dérivé de q_new,
+        toujours strictement inférieur à l'ancienne estimation legacy dans
+        un scénario où le prix a significativement monté."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="1.4374", base="313.496", quote="158.231")
+        instrument = adapter.get_instrument("XRP-USDC")
+        balances = adapter.get_balances("XRP", "USDC")
+
+        legacy_estimate = balances.quote_available + balances.base_available * Decimal("1.4374")
+
+        new_config = grid_replacement.compute_new_config(adapter, config, "UP", balances, instrument)
+        assert new_config is not None
+
+        assert new_config.allocated_capital != legacy_estimate
+        assert new_config.allocated_capital < legacy_estimate  # jamais gonflé par la plus-value latente

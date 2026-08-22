@@ -75,9 +75,9 @@ from decimal import Decimal, ROUND_DOWN
 
 import market_reader
 from candidate_economic_validator import validate_candidate
-from grid_preflight import PreflightConfig, run_preflight
+from grid_preflight import PreflightConfig, PreflightError, run_preflight
 from grid_trading_controller import GridTradingController, GridTradingState
-from trellis_calculator import GridGeometry
+from trellis_calculator import GridGeometry, TrellisCalculator
 
 # Seul paramètre du mécanisme de déclenchement -- même discipline que
 # CHURN_PROTECTION_N (churn_protection.py) : un compteur d'observations
@@ -373,8 +373,8 @@ def _orders_still_open(adapter, inst_id: str) -> bool:
 
 
 def compute_new_config(
-    adapter, old_config: PreflightConfig, direction: str, allocated_capital_new: Decimal, instrument,
-) -> PreflightConfig:
+    adapter, old_config: PreflightConfig, direction: str, balances, instrument,
+) -> PreflightConfig | None:
     """Construit la configuration (q=None, pas encore figé) de la nouvelle
     grille. Fait 2 appels réseau (market_reader.read pour ATR/DI,
     get_ticker pour le déplacement déjà réalisé) -- comme
@@ -391,6 +391,30 @@ def compute_new_config(
         inchangée (règles 7-8).
       - aucun coefficient nouveau : réutilise intégralement _atr_width_pct
         (copie de _simulate_policy), sans pondération additionnelle.
+
+    DIMENSIONNEMENT (Solution C, chantier validé séparément) : q_new est le
+    plus grand q satisfaisant SIMULTANÉMENT les deux ressources RÉELLEMENT
+    disponibles maintenant -- jamais une estimation de patrimoine total
+    (quote + base × prix courant), qui convertirait une plus-value latente
+    en capital de trading fictif, ni une vente automatique de base pour
+    financer la grille (aucune des deux n'est jamais faite ici) :
+
+        q_base = base_available / nu
+        q_cash = quote_available / sum(lower_levels)
+        q_new  = round_down(min(q_base, q_cash), lot_size)
+
+    `lower_levels` provient du treillis de LA NOUVELLE grille (P0_new/
+    GLL_new/GUL_new déjà figés ci-dessus), recalculé ici via
+    TrellisCalculator (même service public que grid_preflight.py, mêmes
+    formules de tick-rounding -- jamais une formule dupliquée/divergente)
+    uniquement pour connaître lower_levels AVANT de figer allocated_capital
+    -- run_preflight() reste ensuite l'unique source de vérité pour q
+    (recalcul strictement identique à allocated_capital_new/denominator,
+    q_new étant déjà un multiple de lot_size par construction).
+
+    Retourne None si q_new < min_size : reconstruction refusée proprement,
+    jamais de grille invalide activée (retentée au cycle suivant par
+    l'appelant, exactement comme un candidat économiquement invalide).
     """
     if direction == "UP":
         borne_old = old_config.gul
@@ -420,11 +444,32 @@ def compute_new_config(
     gll = Decimal(str(float(p0_new) * (1 - gll_pct)))
 
     fees = adapter.get_fee_rates(old_config.inst_id)
+    spacing_h_pct = abs(fees.maker)
+
+    raw_trellis = TrellisCalculator().calculate(
+        float(gul), float(gll), old_config.nu, old_config.nl, float(p0_new),
+        old_config.geometry, float(spacing_h_pct),
+    )
+    trellis = tuple(
+        p0_new if index == old_config.nl else _round_down(Decimal(str(level)), instrument.tick_size)
+        for index, level in enumerate(raw_trellis)
+    )
+    lower_levels = trellis[:old_config.nl]
+    sum_lower = sum(lower_levels, Decimal("0"))
+
+    q_base = balances.base_available / Decimal(old_config.nu)
+    q_cash = balances.quote_available / sum_lower
+    q_new = _round_down(min(q_base, q_cash), instrument.lot_size)
+
+    if q_new < instrument.min_size:
+        return None
+
+    allocated_capital_new = q_new * (Decimal(old_config.nu) * p0_new + sum_lower)
 
     return PreflightConfig(
         inst_id=old_config.inst_id, gul=gul, gll=gll,
         nu=old_config.nu, nl=old_config.nl, p0=p0_new,
-        geometry=old_config.geometry, spacing_h_pct=abs(fees.maker),
+        geometry=old_config.geometry, spacing_h_pct=spacing_h_pct,
         alpha=old_config.alpha, operational_margin=old_config.operational_margin,
         allocated_capital=allocated_capital_new,
     )
@@ -469,11 +514,22 @@ def run_replacement_check(
             return config, False  # retente l'annulation au cycle suivant
 
         balances = adapter.get_balances(instrument.base_ccy, instrument.quote_ccy)
-        ticker = adapter.get_ticker(config.inst_id)
-        allocated_capital_new = balances.quote_available + balances.base_available * ticker.last
 
-        draft = compute_new_config(adapter, config, state.direction, allocated_capital_new, instrument)
-        report = run_preflight(adapter, draft)
+        draft = compute_new_config(adapter, config, state.direction, balances, instrument)
+        if draft is None:
+            # q_new < min_size sous les ressources réellement disponibles --
+            # reconstruction refusée proprement (Solution C, règle 8),
+            # retentée au cycle suivant. Jamais de grille invalide activée.
+            return config, False
+
+        try:
+            report = run_preflight(adapter, draft)
+        except PreflightError:
+            # Même doctrine que validation.valid=False ci-dessous : un
+            # candidat qui échoue au pré-vol (min_notional, invariants du
+            # treillis...) n'est jamais activé -- retenté au cycle suivant,
+            # jamais une exception qui interromprait run().
+            return config, False
 
         validation = validate_candidate(
             fees=adapter.get_fee_rates(config.inst_id), anchor_price=float(draft.p0),
