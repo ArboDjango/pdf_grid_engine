@@ -220,3 +220,44 @@ class TestFullMaterializationReachesActivated:
         assert "dépassement BAS : P0_new == GLL_old ?" in out
         assert fake.placed_orders == []
         assert fake.cancelled_orders == []
+
+    def test_solution_c_reaches_activated_in_a_single_cycle_without_deficit_buy(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Régression de comportement (dimensionnement Solution C) : q_new
+        est désormais borné par base_available/quote_available réellement
+        détenus, donc required_spot <= base_available par construction --
+        plus aucun achat patrimonial de comblement n'est nécessaire pour ce
+        scénario. La confirmation (cycle 5, 3e observation hors bornes) et
+        la matérialisation complète (annulation + placement + retour à
+        ACTIVE) aboutissent désormais dans le MÊME appel à
+        run_replacement_check -- avant Solution C, ce même scénario exigeait
+        un achat de déficit (INITBUY...) et plusieurs cycles supplémentaires."""
+        state_path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        write_real_state(state_path, config)
+
+        fake = FakeAdapter(ticker_price="1.20")
+        fake.open_orders = (open_order(1.02, side="SELL", coid="GRID-EXISTING-1"),)
+
+        monkeypatch.setattr(dry_run_replacement, "build_adapter", lambda mode: fake)
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "dry_run_replacement.py", "--inst-id", "XRP-USDC", "--state-file", state_path,
+                "--max-cycles", "10",
+                "--prices", ",".join(["1.02"] * 2 + ["1.08", "1.15"] + ["1.20"] * 5),
+            ],
+        )
+
+        rc = dry_run_replacement.main()
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "REMPLACEMENT MATÉRIALISÉ au cycle 5" in out  # même cycle que la 3e confirmation
+        assert "SIMULÉ place_market_buy" not in out  # aucun déficit spot -- Solution C le garantit
+        assert "Achat(s) patrimonial(aux) SIMULÉ(S)" not in out
+        assert "P0_new == round_down(borne_old, tick_size) : OK" in out
+        assert "déplacement_pct  = None" not in out  # capturé malgré la matérialisation en un seul cycle
+        assert fake.placed_orders == []
+        assert fake.cancelled_orders == []

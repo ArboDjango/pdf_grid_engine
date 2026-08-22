@@ -401,6 +401,12 @@ def main() -> int:
     observed_direction: str | None = None
     observed_confirmation_price: Decimal | None = None
 
+    # Lecture seule, une fois -- sert à la fois à détecter la direction du
+    # remplacement matérialisé (ci-dessous) et au rapport final.
+    instrument = dry_adapter.get_instrument(args.inst_id)
+    expected_p0_up = grid_replacement._round_down(real_config.gul, instrument.tick_size)
+    expected_p0_down = grid_replacement._round_down(real_config.gll, instrument.tick_size)
+
     for cycle in range(1, args.max_cycles + 1):
         pre_state = grid_replacement.load_replacement_state(dry_state_path)
         print(
@@ -417,27 +423,32 @@ def main() -> int:
             f"materialize={materialize}"
         )
         history.append((cycle, pre_state.lifecycle_status, post_state.lifecycle_status, materialize))
-        # Capturé pendant CANCELLING/ACTIVATING, AVANT que l'écrasement final
-        # (_persist_new_active_config) ne réinitialise "replacement" -- seule
-        # source fiable de la direction, jamais recalculée après coup par
-        # comparaison de bornes (qui échouerait à cause de l'arrondi tick_size
-        # appliqué à P0_new).
-        if post_state.direction is not None:
-            observed_direction = post_state.direction
-            # Capturé UNE SEULE FOIS, à la toute première transition hors de
-            # ACTIVE -- c'est exactement le prix que grid_replacement.py a lu
-            # via get_ticker() pour confirmer le dépassement et calculer
-            # déplacement_pct (voir compute_new_config). dry_adapter.last_price_seen
-            # continue d'avancer à chaque cycle suivant (y compris après
-            # matérialisation, pour la détection sur la NOUVELLE grille) --
-            # le lire plus tard donnerait un prix différent de celui
-            # réellement utilisé pour construire cette configuration.
-            if observed_confirmation_price is None:
-                observed_confirmation_price = dry_adapter.last_price_seen
 
         if new_config != config:
             print(f"    >>> REMPLACEMENT MATÉRIALISÉ au cycle {cycle} <<<")
             replacement_completed_at = cycle
+            # Capturés ICI, au moment exact où le remplacement aboutit --
+            # contrairement à une lecture de post_state.direction, ceci
+            # fonctionne QUEL QUE SOIT le nombre de cycles internes qu'a
+            # pris la transition. Depuis le dimensionnement Solution C
+            # (q_new borné par les ressources réellement disponibles),
+            # CANCELLING -> ACTIVATING -> ACTIVATED peut désormais aboutir
+            # en un seul appel à run_replacement_check (plus d'achat
+            # patrimonial intermédiaire nécessaire dans le cas général) --
+            # post_state, relu APRÈS le retour de cet appel, refléterait
+            # alors déjà l'état "ACTIVE" final (replacement réinitialisé
+            # par _persist_new_active_config), jamais la direction/le prix
+            # de confirmation intermédiaires. dry_adapter.last_price_seen,
+            # lui, reste correct : le dernier get_ticker() de ce cycle est
+            # celui de compute_new_config (déplacement_pct), et la
+            # direction se déduit sans ambiguïté de new_config.p0 comparé
+            # aux deux bornes arrondies (jamais par égalité brute, invalide
+            # à cause du tick_size).
+            observed_confirmation_price = dry_adapter.last_price_seen
+            if new_config.p0 == expected_p0_up:
+                observed_direction = "UP"
+            elif new_config.p0 == expected_p0_down:
+                observed_direction = "DOWN"
             config = new_config
         print()
 
@@ -466,8 +477,7 @@ def main() -> int:
 
     direction = observed_direction or "?"
     borne_old = real_config.gul if direction == "UP" else real_config.gll
-    instrument = dry_adapter.get_instrument(args.inst_id)
-    expected_p0 = grid_replacement._round_down(borne_old, instrument.tick_size) if direction in ("UP", "DOWN") else None
+    expected_p0 = expected_p0_up if direction == "UP" else (expected_p0_down if direction == "DOWN" else None)
     prix_confirmation = observed_confirmation_price
     deplacement_pct = None
     if prix_confirmation is not None and borne_old:
