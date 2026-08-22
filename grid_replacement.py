@@ -75,9 +75,11 @@ from decimal import Decimal, ROUND_DOWN
 
 import market_reader
 from candidate_economic_validator import validate_candidate
-from grid_activation_controller import GridActivationState
+from grid_activation_controller import GridActivationState, derive_grid_order_id
+from grid_order_projection import BUY, SELL
 from grid_preflight import PreflightConfig, PreflightError, run_preflight
 from grid_trading_controller import GridTradingController, GridTradingState
+from okx_spot_adapter import OkxApiError
 from trellis_calculator import GridGeometry, TrellisCalculator
 
 # Seul paramètre du mécanisme de déclenchement -- même discipline que
@@ -477,6 +479,44 @@ def compute_new_config(
 
 
 # ---------------------------------------------------------------------------
+# Exposition réelle de la nouvelle grille pendant ACTIVATING.
+# ---------------------------------------------------------------------------
+
+
+def _new_grid_has_real_exposure(adapter, frozen: PreflightConfig, instrument) -> bool:
+    """Vérifie l'exposition RÉELLE de la nouvelle grille -- directement via
+    list_open_orders() et l'identité déterministe de CHAQUE niveau du
+    treillis de `frozen` (derive_grid_order_id, même formule que
+    GridActivationController -- jamais réinventée). Indépendant de
+    report.orders/k_buy/k_sell/select_exposed_orders : ne dépend jamais du
+    sous-ensemble filtré par un cycle particulier de plan_exposure, mais
+    d'un recensement complet, sur tout le treillis théorique de `frozen`.
+
+    STRICTEMENT en lecture (run_preflight, list_open_orders) -- ne place
+    et n'annule jamais aucun ordre. Ne lève jamais : une erreur de lecture
+    (OkxApiError) ou une config qui échouerait au pré-vol (ne devrait pas
+    arriver, `frozen` étant déjà validée à CANCELLING) signifie simplement
+    "exposition non encore prouvée", jamais une exception qui interromprait
+    run().
+    """
+    try:
+        report = run_preflight(adapter, frozen)
+        open_orders = adapter.list_open_orders(frozen.inst_id)
+    except (PreflightError, OkxApiError):
+        return False
+
+    open_ids = {order.client_order_id for order in open_orders}
+    for index, price in enumerate(report.trellis):
+        if index == frozen.nl:
+            continue  # P0 lui-même, jamais un ordre
+        side = BUY if index < frozen.nl else SELL
+        derived_id = derive_grid_order_id(frozen, instrument.tick_size, instrument.lot_size, side, float(price))
+        if derived_id in open_ids:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Orchestration -- point d'entrée appelé depuis run_active_grid.run().
 # ---------------------------------------------------------------------------
 
@@ -553,14 +593,23 @@ def run_replacement_check(
         frozen = state.pending_config
         activation = GridTradingController().run(adapter, frozen, k_buy=k_buy, k_sell=k_sell)
 
-        # Solution D (chantier validé séparément) : un PARTIALLY_EXPOSED
-        # dû UNIQUEMENT à un filtre de matérialisation (price-limit et/ou
-        # liquidité -- jamais un rejet OKX réel) est traité comme le régime
-        # de croisière le traite déjà lui-même : la grille devient ACTIVE
-        # dès qu'au moins un ordre réel y est exposé (already_open ou
-        # placed), les niveaux filtrés restant simplement non matérialisés,
-        # repris ensuite par le cycle normal -- exactement comme n'importe
-        # quel niveau temporairement hors bande de prix sur une grille déjà
+        # Solution D (chantier validé séparément), corrigée : un
+        # PARTIALLY_EXPOSED dû UNIQUEMENT à un filtre de matérialisation
+        # (price-limit et/ou liquidité -- jamais un rejet OKX réel) est
+        # traité comme le régime de croisière le traite déjà lui-même : la
+        # grille devient ACTIVE dès qu'elle a une exposition RÉELLE prouvée
+        # -- vérifiée directement sur tout le treillis via
+        # _new_grid_has_real_exposure(), jamais via
+        # activation_result.placed/.already_open (ces deux champs ne
+        # portent que sur report.orders du cycle courant -- un sous-
+        # ensemble déjà filtré et déjà réduit par select_exposed_orders/
+        # plan_exposure, qui exclut tout ce qui n'a besoin d'aucune action ;
+        # un ordre déjà ouvert depuis un cycle antérieur peut donc être
+        # absent de ces deux champs sans que la grille soit pour autant
+        # dépourvue d'exposition réelle -- cas observé en LIVE). Les
+        # niveaux filtrés restent simplement non matérialisés, repris
+        # ensuite par le cycle normal -- exactement comme n'importe quel
+        # niveau temporairement hors bande de prix sur une grille déjà
         # active. Aucune sélection, aucun filtre, aucune géométrie, aucun q
         # ne sont touchés ici : seule la condition de sortie d'ACTIVATING
         # change.
@@ -568,7 +617,7 @@ def run_replacement_check(
             activation.activation_result is not None
             and activation.activation_result.state != GridActivationState.ERROR
             and not activation.activation_result.failed
-            and (activation.activation_result.placed or activation.activation_result.already_open)
+            and _new_grid_has_real_exposure(adapter, frozen, instrument)
         )
         if activation.state != GridTradingState.ACTIVATED and not (
             activation.state == GridTradingState.PARTIALLY_EXPOSED and exposed_without_real_rejection

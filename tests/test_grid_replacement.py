@@ -14,7 +14,7 @@ import pytest
 
 import grid_replacement
 import market_reader
-from grid_activation_controller import GridActivationResult, GridActivationState
+from grid_activation_controller import GridActivationResult, GridActivationState, derive_grid_order_id
 from grid_preflight import PreflightConfig, run_preflight
 from grid_trading_controller import GridTradingController, GridTradingResult, GridTradingState
 from okx_spot_adapter import (
@@ -652,14 +652,20 @@ class TestSolutionCSizing:
 
 
 # =============================================================================
-# Solution D : sortie de ACTIVATING sur PARTIALLY_EXPOSED prouvé par une
-# exposition réelle -- ne touche ni la sélection, ni les filtres, ni
-# GridActivationController (mockés ici pour isoler précisément la NOUVELLE
-# condition de sortie de run_replacement_check, seule chose modifiée).
+# Solution D corrigée : sortie de ACTIVATING sur PARTIALLY_EXPOSED prouvé
+# par une exposition RÉELLE (list_open_orders + identité déterministe du
+# treillis de pending_config, via _new_grid_has_real_exposure) -- jamais
+# via activation_result.placed/.already_open (bug découvert : ces deux
+# champs ne portent que sur report.orders du cycle courant, un sous-
+# ensemble déjà réduit par select_exposed_orders/plan_exposure). Ni la
+# sélection, ni les filtres, ni GridActivationController/GridTradingController
+# ne sont touchés (mockés/réels selon le test, pour isoler précisément la
+# NOUVELLE condition de sortie de run_replacement_check, seule chose
+# modifiée).
 # =============================================================================
 
 
-class TestActivatingExitsOnProvenPartialExposure:
+class TestActivatingExitsOnRealExposure:
     def _frozen(self):
         return grid_config(
             p0=Decimal("1.0563"), gul=Decimal("1.6859790928339347"), gll=Decimal("0.7932303786978732"),
@@ -676,7 +682,23 @@ class TestActivatingExitsOnProvenPartialExposure:
             lambda self, adapter, config, k_buy=None, k_sell=None: result,
         )
 
+    def _real_order_at(self, frozen, instrument, side, price):
+        """Construit un OrderSnapshot dont le client_order_id est calculé
+        avec la MÊME fonction (derive_grid_order_id) que celle utilisée en
+        production -- jamais un identifiant inventé, jamais une
+        duplication de la formule."""
+        derived_id = derive_grid_order_id(frozen, instrument.tick_size, instrument.lot_size, side, price)
+        return OrderSnapshot(
+            "ORD-" + derived_id[-6:], derived_id, frozen.inst_id, side,
+            Decimal(str(price)), Decimal("10"), Decimal("0"), "live", "post_only", None, None,
+        )
+
+    def _trellis(self, adapter, frozen):
+        return run_preflight(adapter, frozen).trellis
+
     def test_1_activated_transitions_to_active_unchanged(self, tmp_path, monkeypatch):
+        """ACTIVATED sort inconditionnellement, sans jamais consulter
+        l'exposition réelle -- comportement historique inchangé."""
         path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         old_config = grid_config()
         frozen = self._frozen()
@@ -696,56 +718,20 @@ class TestActivatingExitsOnProvenPartialExposure:
         assert new_config == frozen
         assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
 
-    def test_2_partially_exposed_with_already_open_transitions_to_active(self, tmp_path, monkeypatch):
-        """Cas XRP réel : les 2 BUY déjà ouverts (0.9494, 1.0014) --
-        already_open non vide, placed vide, failed vide, state != ERROR."""
+    def test_2_real_buy_exposure_transitions_to_active(self, tmp_path, monkeypatch):
+        """Exposition réelle BUY (list_open_orders + identité du treillis
+        de pending_config) -- activation_result délibérément VIDE des deux
+        côtés pour prouver que la sortie ne dépend plus de ces champs."""
         path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         old_config = grid_config()
         frozen = self._frozen()
         self._pending(path, frozen)
-
-        activation_result = GridActivationResult(
-            GridActivationState.ACTIVE,
-            (("BUY", 0.9494, 63.758), ("BUY", 1.0014, 63.758)), (), (), (), None,
-        )
-        self._mock_run(monkeypatch, GridTradingResult(
-            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
-            "fenêtre d'exposition demandée non entièrement matérialisée",
-        ))
 
         adapter = FakeAdapter(ticker_price="1.20")
-        new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
-
-        assert materialize is True
-        assert new_config == frozen
-        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
-
-    def test_3_partially_exposed_with_placed_transitions_to_active(self, tmp_path, monkeypatch):
-        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
-        old_config = grid_config()
-        frozen = self._frozen()
-        self._pending(path, frozen)
-
-        activation_result = GridActivationResult(
-            GridActivationState.ACTIVE, (), (), (("BUY", 0.9494, 63.758),), (), None,
-        )
-        self._mock_run(monkeypatch, GridTradingResult(
-            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
-            "fenêtre d'exposition demandée non entièrement matérialisée",
-        ))
-
-        adapter = FakeAdapter(ticker_price="1.20")
-        new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
-
-        assert materialize is True
-        assert new_config == frozen
-        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
-
-    def test_4_partially_exposed_without_any_real_exposure_stays_activating(self, tmp_path, monkeypatch):
-        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
-        old_config = grid_config()
-        frozen = self._frozen()
-        self._pending(path, frozen)
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        buy_price = float(trellis[frozen.nl - 1])  # niveau BUY juste sous P0
+        adapter.open_orders = (self._real_order_at(frozen, instrument, "BUY", buy_price),)
 
         activation_result = GridActivationResult(GridActivationState.ACTIVE, (), (), (), (), None)
         self._mock_run(monkeypatch, GridTradingResult(
@@ -753,7 +739,54 @@ class TestActivatingExitsOnProvenPartialExposure:
             "fenêtre d'exposition demandée non entièrement matérialisée",
         ))
 
+        new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
+
+        assert materialize is True
+        assert new_config == frozen
+        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
+
+    def test_3_real_sell_exposure_transitions_to_active(self, tmp_path, monkeypatch):
+        """Symétrique du test 2, côté SELL."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        old_config = grid_config()
+        frozen = self._frozen()
+        self._pending(path, frozen)
+
         adapter = FakeAdapter(ticker_price="1.20")
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        sell_price = float(trellis[frozen.nl + 1])  # niveau SELL juste au-dessus de P0
+        adapter.open_orders = (self._real_order_at(frozen, instrument, "SELL", sell_price),)
+
+        activation_result = GridActivationResult(GridActivationState.ACTIVE, (), (), (), (), None)
+        self._mock_run(monkeypatch, GridTradingResult(
+            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
+            "fenêtre d'exposition demandée non entièrement matérialisée",
+        ))
+
+        new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
+
+        assert materialize is True
+        assert new_config == frozen
+        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
+
+    def test_4_no_real_exposure_stays_activating(self, tmp_path, monkeypatch):
+        """Aucun ordre réel ne correspond à l'identité de pending_config
+        (carnet vide) -- reste ACTIVATING."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        old_config = grid_config()
+        frozen = self._frozen()
+        self._pending(path, frozen)
+
+        activation_result = GridActivationResult(
+            GridActivationState.ACTIVE, (), (), (("BUY", 0.9494, 63.758),), (), None,
+        )  # même avec du contenu ici, sans ordre réel correspondant sur l'adapter -> reste ACTIVATING
+        self._mock_run(monkeypatch, GridTradingResult(
+            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
+            "fenêtre d'exposition demandée non entièrement matérialisée",
+        ))
+
+        adapter = FakeAdapter(ticker_price="1.20")  # open_orders vide par défaut
         result_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
 
         assert materialize is False
@@ -762,11 +795,53 @@ class TestActivatingExitsOnProvenPartialExposure:
         assert state.lifecycle_status == "ACTIVATING"
         assert state.pending_config == frozen  # jamais recalculée
 
-    def test_5_partially_exposed_with_activation_error_stays_activating(self, tmp_path, monkeypatch):
+    def test_5_real_exposure_with_failed_stays_activating(self, tmp_path, monkeypatch):
+        """Une exposition réelle existe, mais failed est non vide (rejet
+        OKX réel sur un AUTRE niveau ce cycle) -- garde-fou prioritaire,
+        reste ACTIVATING quoi qu'il arrive côté exposition."""
         path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         old_config = grid_config()
         frozen = self._frozen()
         self._pending(path, frozen)
+
+        adapter = FakeAdapter(ticker_price="1.20")
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        buy_price = float(trellis[frozen.nl - 1])
+        adapter.open_orders = (self._real_order_at(frozen, instrument, "BUY", buy_price),)
+
+        activation_result = GridActivationResult(
+            GridActivationState.PARTIAL, (), (), (),
+            ((("SELL", 1.1664, 63.758), "51006", "Order price out of price limit"),),
+            "1 niveau(x) rejeté(s) au placement",
+        )
+        self._mock_run(monkeypatch, GridTradingResult(
+            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
+            "activation partielle au sens de GridActivationController (état=PARTIAL)",
+        ))
+
+        result_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
+
+        assert materialize is False
+        assert result_config == old_config
+        state = grid_replacement.load_replacement_state(path)
+        assert state.lifecycle_status == "ACTIVATING"
+        assert state.pending_config == frozen
+
+    def test_6_real_exposure_with_activation_error_stays_activating(self, tmp_path, monkeypatch):
+        """Une exposition réelle existe, mais activation_result.state ==
+        ERROR ce cycle -- reste ACTIVATING quoi qu'il arrive côté
+        exposition."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        old_config = grid_config()
+        frozen = self._frozen()
+        self._pending(path, frozen)
+
+        adapter = FakeAdapter(ticker_price="1.20")
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        buy_price = float(trellis[frozen.nl - 1])
+        adapter.open_orders = (self._real_order_at(frozen, instrument, "BUY", buy_price),)
 
         activation_result = GridActivationResult(
             GridActivationState.ERROR, (), (), (), (), "sondage des ordres ouverts a échoué",
@@ -776,7 +851,6 @@ class TestActivatingExitsOnProvenPartialExposure:
             "activation partielle au sens de GridActivationController (état=ERROR)",
         ))
 
-        adapter = FakeAdapter(ticker_price="1.20")
         result_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
 
         assert materialize is False
@@ -785,24 +859,24 @@ class TestActivatingExitsOnProvenPartialExposure:
         assert state.lifecycle_status == "ACTIVATING"
         assert state.pending_config == frozen
 
-    def test_6_partially_exposed_with_failed_stays_activating(self, tmp_path, monkeypatch):
+    def test_7_all_filtered_and_no_exposure_stays_activating(self, tmp_path, monkeypatch):
+        """price-limit et/ou liquidité filtrent tous les candidats du
+        cycle (activation_result entièrement vide) ET aucune exposition
+        réelle n'existe par ailleurs -- ne doit JAMAIS être traité comme
+        une activation réussie par défaut."""
         path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         old_config = grid_config()
         frozen = self._frozen()
         self._pending(path, frozen)
 
-        activation_result = GridActivationResult(
-            GridActivationState.PARTIAL,
-            (("BUY", 0.9494, 63.758),), (), (),
-            ((("SELL", 1.1664, 63.758), "51006", "Order price out of price limit"),),
-            "1 niveau(x) rejeté(s) au placement",
-        )
+        activation_result = GridActivationResult(GridActivationState.ACTIVE, (), (), (), (), None)
         self._mock_run(monkeypatch, GridTradingResult(
             GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
-            "activation partielle au sens de GridActivationController (état=PARTIAL)",
+            "fenêtre d'exposition demandée non entièrement matérialisée : "
+            "2 niveau(x) écarté(s) par un filtre de matérialisation (liquidité et/ou price-limit)",
         ))
 
-        adapter = FakeAdapter(ticker_price="1.20")
+        adapter = FakeAdapter(ticker_price="1.20")  # aucun ordre réel
         result_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
 
         assert materialize is False
@@ -811,18 +885,63 @@ class TestActivatingExitsOnProvenPartialExposure:
         assert state.lifecycle_status == "ACTIVATING"
         assert state.pending_config == frozen
 
-    def test_7_persisted_config_after_partial_exit_is_exactly_pending_config(self, tmp_path, monkeypatch):
-        """Aucun recalcul de q/P0/GLL/GUL/allocated_capital lors de la
-        sortie via PARTIALLY_EXPOSED -- persistance strictement identique
-        à pending_config, via le même _persist_new_active_config que pour
-        une sortie ACTIVATED normale."""
+    def test_8_xrp_regression_empty_activation_result_but_real_orders_present(self, tmp_path, monkeypatch):
+        """Reproduction EXACTE du bug LIVE découvert : activation_result
+        entièrement vide (already_open=(), placed=(), failed=()) --
+        exactement ce que produit GridActivationController quand
+        narrowed_report.orders est vide -- alors que 2 ordres BUY réels,
+        correspondant exactement à l'identité de pending_config, existent
+        sur l'adaptateur. Solution D (activation_result.placed/
+        already_open) manquait ce cas ; la vérification directe doit
+        désormais le détecter et sortir vers ACTIVE."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        old_config = grid_config()
+        frozen = self._frozen()
+        self._pending(path, frozen)
+
+        adapter = FakeAdapter(ticker_price="1.20")
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        buy_price_1 = float(trellis[frozen.nl - 1])
+        buy_price_2 = float(trellis[frozen.nl - 2])
+        adapter.open_orders = (
+            self._real_order_at(frozen, instrument, "BUY", buy_price_1),
+            self._real_order_at(frozen, instrument, "BUY", buy_price_2),
+        )
+
+        # Exactement le résultat observé en LIVE : rien dans
+        # already_open/placed/failed -- narrowed_report.orders était vide
+        # ce cycle (tout filtré : le nouveau candidat cash par liquidité,
+        # le SELL par price-limit).
+        activation_result = GridActivationResult(GridActivationState.ACTIVE, (), (), (), (), None)
+        self._mock_run(monkeypatch, GridTradingResult(
+            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
+            "fenêtre d'exposition demandée (k_buy=1/k_sell=1) non entièrement "
+            "matérialisée : 2 niveau(x) écarté(s) par un filtre de matérialisation "
+            "(liquidité et/ou price-limit)",
+        ))
+
+        new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
+
+        assert materialize is True
+        assert new_config == frozen
+        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
+        # Aucun ordre réel introduit par cette vérification -- purement en
+        # lecture (list_open_orders/run_preflight), aucun place_*/cancel_*.
+        assert adapter.placed_orders == []
+        assert adapter.cancelled_orders == []
+
+    def test_9_okx_error_during_exposure_check_stays_activating_without_exception(self, tmp_path, monkeypatch):
+        """Une panne réseau pendant list_open_orders() (à l'intérieur de
+        _new_grid_has_real_exposure) ne doit jamais lever -- traitée comme
+        "exposition non encore prouvée", retentée au cycle suivant."""
         path = str(tmp_path / "active_grid_state_XRP-USDC.json")
         old_config = grid_config()
         frozen = self._frozen()
         self._pending(path, frozen)
 
         activation_result = GridActivationResult(
-            GridActivationState.ACTIVE, (("BUY", 0.9494, 35.462),), (), (), (), None,
+            GridActivationState.ACTIVE, (("BUY", 0.9494, 63.758),), (), (), (), None,
         )
         self._mock_run(monkeypatch, GridTradingResult(
             GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
@@ -830,6 +949,41 @@ class TestActivatingExitsOnProvenPartialExposure:
         ))
 
         adapter = FakeAdapter(ticker_price="1.20")
+
+        def _raise(*args, **kwargs):
+            raise OkxApiError("panne réseau simulée")
+        monkeypatch.setattr(adapter, "list_open_orders", _raise)
+
+        result_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
+
+        assert materialize is False
+        assert result_config == old_config
+        state = grid_replacement.load_replacement_state(path)
+        assert state.lifecycle_status == "ACTIVATING"
+        assert state.pending_config == frozen
+
+    def test_10_persisted_config_after_real_exposure_exit_is_exactly_pending_config(self, tmp_path, monkeypatch):
+        """Aucun recalcul de q/P0/GLL/GUL/allocated_capital lors de la
+        sortie par exposition réelle -- persistance strictement identique
+        à pending_config, via le même _persist_new_active_config que pour
+        une sortie ACTIVATED normale."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        old_config = grid_config()
+        frozen = self._frozen()
+        self._pending(path, frozen)
+
+        adapter = FakeAdapter(ticker_price="1.20")
+        instrument = adapter.get_instrument(frozen.inst_id)
+        trellis = self._trellis(adapter, frozen)
+        buy_price = float(trellis[frozen.nl - 1])
+        adapter.open_orders = (self._real_order_at(frozen, instrument, "BUY", buy_price),)
+
+        activation_result = GridActivationResult(GridActivationState.ACTIVE, (), (), (), (), None)
+        self._mock_run(monkeypatch, GridTradingResult(
+            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
+            "fenêtre d'exposition demandée non entièrement matérialisée",
+        ))
+
         new_config, materialize = grid_replacement.run_replacement_check(adapter, old_config, 1, 1, path)
 
         assert materialize is True
@@ -840,74 +994,3 @@ class TestActivatingExitsOnProvenPartialExposure:
         assert Decimal(persisted["gul"]) == frozen.gul
         assert Decimal(persisted["q"]) == frozen.q
         assert Decimal(persisted["allocated_capital"]) == frozen.allocated_capital
-
-    def test_8_xrp_scenario_becomes_active_via_real_buy_exposure_then_normal_regime_resumes(
-        self, tmp_path, monkeypatch,
-    ):
-        """Scénario XRP LIVE (bc4211b/4e38b72) : dépassement UP confirmé,
-        ancienne génération réellement annulée (adapter réel, pas mocké),
-        Solution C réellement exécutée pour geler la nouvelle config, puis
-        ACTIVATING mocké sur un résultat structuré fidèle au cas LIVE
-        observé -- 2 BUY déjà ouverts (already_open), aucun SELL dans
-        placed/already_open/failed (jamais tenté : filtré par price-limit
-        AVANT GridActivationController, jamais simulé de contournement
-        ici). La grille doit devenir ACTIVE grâce aux BUY réellement
-        exposés, puis le cycle normal (déjà existant, inchangé) doit
-        reprendre la main sans traitement particulier."""
-        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
-        config = grid_config()
-        adapter = FakeAdapter(ticker_price="1.20")
-        adapter.open_orders = (
-            open_order(1.0013, side="BUY", coid="GRID-OLD-BUY"),
-            open_order(1.0451, side="SELL", coid="GRID-OLD-SELL"),
-        )
-
-        # ACTIVATING mocké AVANT même le déclenchement -- l'économie par
-        # défaut de FakeAdapter est trop généreuse pour observer un
-        # ACTIVATING stable entre deux cycles depuis Solution C (le cas
-        # normal matérialise désormais en un seul cycle) ; seule cette
-        # étape est mockée, la détection N=3, l'annulation réelle et le
-        # calcul Solution C de la nouvelle config restent intégralement
-        # réels, non mockés.
-        activation_result = GridActivationResult(
-            GridActivationState.ACTIVE,
-            (("BUY", 0.9494, 63.758), ("BUY", 1.0014, 63.758)), (), (), (), None,
-        )
-        assert all(instr[1] != 1.1664 for instr in (*activation_result.already_open, *activation_result.placed))
-        assert activation_result.failed == ()  # jamais tenté, donc jamais un rejet
-        self._mock_run(monkeypatch, GridTradingResult(
-            GridTradingState.PARTIALLY_EXPOSED, "1", None, activation_result,
-            "fenêtre d'exposition demandée (k_buy=1/k_sell=1) non entièrement "
-            "matérialisée : 1 niveau(x) écarté(s) par un filtre de matérialisation "
-            "(liquidité et/ou price-limit)",
-        ))
-
-        placed_before = list(adapter.placed_orders)
-
-        # Dépassement confirmé (N=3) -- ancienne génération réellement
-        # annulée via l'adaptateur réel (pas mocké) : cancel_order est
-        # bien appelé pour de vrai sur les 2 ordres de l'ancienne grille.
-        # Avec le mock ci-dessus, ACTIVATING sort dès qu'il est atteint --
-        # tout aboutit dans la même série d'appels de confirmation.
-        new_config = config
-        materialize = True
-        for _ in range(grid_replacement.REPLACEMENT_N + 1):
-            new_config, materialize = grid_replacement.run_replacement_check(adapter, new_config, 1, 1, path)
-        assert "GRID-OLD-BUY" in adapter.cancelled_orders
-        assert "GRID-OLD-SELL" in adapter.cancelled_orders
-
-        assert materialize is True
-        assert new_config != config  # une nouvelle identité, distincte de l'ancienne grille
-        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
-        # Aucun ordre réel introduit par cette sortie -- placed_orders de
-        # l'adaptateur réel est inchangé (le mock n'a rien écrit dessus),
-        # et SELL 1.1664 n'y a jamais figuré.
-        assert adapter.placed_orders == placed_before
-        assert not any(o[1] == "SELL" and o[2] == Decimal("1.1664") for o in adapter.placed_orders)
-
-        # Le régime normal reprend la main sans traitement particulier :
-        # un nouveau cycle repart bien de "ACTIVE", inchangé.
-        again_config, again_materialize = grid_replacement.run_replacement_check(adapter, new_config, 1, 1, path)
-        assert again_materialize is True
-        assert again_config == new_config
-        assert grid_replacement.load_replacement_state(path).lifecycle_status == "ACTIVE"
