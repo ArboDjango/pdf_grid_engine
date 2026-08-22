@@ -62,6 +62,7 @@ def select_exposed_orders(
     open_orders: tuple[OrderSnapshot, ...],
     k_buy: int,
     k_sell: int,
+    churn_protected_gis: frozenset[float] = frozenset(),
 ) -> ExposureDecision:
     """Sélectionne les niveaux à exposer -- poursuite de cycle (Niveau 1,
     inconditionnelle) puis cellules initiales les plus proches de P0
@@ -71,6 +72,16 @@ def select_exposed_orders(
     cell_state_reconstruction.reconstruct_cell_states appelée sur ce même
     `report` — dans le même ordre (treillis, P0 exclu), condition
     nécessaire pour que l'appariement d'index ci-dessous soit correct.
+
+    `churn_protected_gis` (churn_protection.py, hors périmètre PDF) :
+    ensemble des gi actuellement CHURN_PROTECTED (3 cycles C consécutifs
+    sans progression) -- exclus UNIQUEMENT du Niveau 1 (aucun NOUVEAU
+    cycle matérialisé pour ces cellules). N'affecte jamais les ordres déjà
+    ouverts (cash_already_open/spot_already_open, ci-dessous, restent
+    inconditionnels) ni le Niveau 2 -- la protection interdit uniquement
+    la création d'un nouveau cycle, jamais l'annulation d'un ordre
+    existant. Défaut frozenset() : comportement strictement inchangé pour
+    tout appelant qui ne connaît pas ce mécanisme.
     """
     if k_buy < 0 or k_sell < 0:
         raise ValueError("k_buy et k_sell doivent être positifs ou nuls")
@@ -104,9 +115,20 @@ def select_exposed_orders(
     # ouvert pour ce côté (donc un événement RÉELLEMENT terminé, jamais un
     # ordre simplement en attente) -- INCONDITIONNEL, jamais trié par
     # distance (aucune compétition entre elles : toutes incluses, fidèles
-    # au PDF, "at the original grid position").
-    cash_cycle = [(idx, cs) for idx, cs in cash_needs_action if cs.last_side is not None]
-    spot_cycle = [(idx, cs) for idx, cs in spot_needs_action if cs.last_side is not None]
+    # au PDF, "at the original grid position") -- SAUF une cellule
+    # actuellement CHURN_PROTECTED (churn_protection.py) : aucun NOUVEAU
+    # cycle n'est matérialisé pour elle tant qu'aucun autre gi de la grille
+    # n'a été effectivement touché. Ne s'applique qu'ici -- ne retire
+    # jamais un ordre déjà ouvert (cash_already_open/spot_already_open
+    # ci-dessus, inconditionnels) ni ne modifie le Niveau 2.
+    cash_cycle = [
+        (idx, cs) for idx, cs in cash_needs_action
+        if cs.last_side is not None and cs.cell.gi not in churn_protected_gis
+    ]
+    spot_cycle = [
+        (idx, cs) for idx, cs in spot_needs_action
+        if cs.last_side is not None and cs.cell.gi not in churn_protected_gis
+    ]
 
     # Niveau 2 : cellules initiales -- comportement V1 strictement inchangé,
     # tri par distance d'index à P0, départage par ordre déjà ouvert en cas

@@ -18,6 +18,10 @@ from decimal import Decimal
 
 from cell_order_identity import derive_next_order_id, derive_root_order_id
 from cell_state_reconstruction import reconstruct_cell_states
+from churn_protection import (
+    fetch_grid_fills, load_churn_protection, protected_gis, save_churn_protection,
+    update_churn_protection,
+)
 from grid_activation_controller import GridActivationController, GridActivationResult
 from grid_order_exposure_controller import ExposureDecision, select_exposed_orders
 from grid_order_projection import BUY, SELL
@@ -145,22 +149,44 @@ def plan_exposure(
     report: PreflightReport,
     k_buy: int,
     k_sell: int,
+    *,
+    churn_state_path: str | None = None,
 ) -> ExposurePlan:
-    """Reconstruction + sélection + dérivation d'identité — PURE.
+    """Reconstruction + sélection + dérivation d'identité — PURE pour tout
+    ce qui concerne la décision d'exposition elle-même.
 
-    Aucun appel d'écriture (ni cancel_order, ni place_post_only_limit) —
-    seules des lectures (list_open_orders, list_fills, get_order via
-    reconstruct_cell_states) et des calculs purs. Extrait de
-    run_exposure_cycle (qui reste, lui, inchangé dans son comportement --
-    voir plus bas) pour permettre sa réutilisation sans jamais dupliquer
-    la logique d'identité/ROOT.
+    Aucun appel d'écriture d'ORDRE (ni cancel_order, ni
+    place_post_only_limit) — seules des lectures (list_open_orders,
+    list_fills, get_order via reconstruct_cell_states) et des calculs
+    purs. Extrait de run_exposure_cycle (qui reste, lui, inchangé dans son
+    comportement -- voir plus bas) pour permettre sa réutilisation sans
+    jamais dupliquer la logique d'identité/ROOT.
+
+    `churn_state_path` : chemin du fichier de persistance anti-churn
+    (churn_protection.py). None (défaut) : mécanisme totalement désactivé,
+    comportement strictement identique à avant son introduction (aucune
+    lecture, aucune écriture, aucun filtre appliqué à
+    select_exposed_orders) -- SEUL run() (run_active_grid.py) fournit ce
+    chemin en usage réel. Si fourni, ce chemin est LU et RÉ-ÉCRIT ici (seule
+    exception au caractère "pur" de cette fonction, au même titre que les
+    lectures réseau ci-dessus) -- même fichier que save_grid_state, fusion
+    stricte, jamais un remplacement des autres clés.
     """
     inst_id = report.config.inst_id
     open_orders = adapter.list_open_orders(inst_id)
 
     cell_states = reconstruct_cell_states(adapter, report, open_orders)
 
-    decision = select_exposed_orders(report, cell_states, open_orders, k_buy, k_sell)
+    if churn_state_path is not None:
+        churn_state = load_churn_protection(churn_state_path)
+        grid_fills = fetch_grid_fills(adapter, report)
+        churn_state = update_churn_protection(churn_state, grid_fills, report.config.p0)
+        save_churn_protection(churn_state, churn_state_path)
+        churn_protected = protected_gis(churn_state)
+    else:
+        churn_protected = frozenset()
+
+    decision = select_exposed_orders(report, cell_states, open_orders, k_buy, k_sell, churn_protected)
     requested_to_materialize = decision.to_materialize  # AVANT tout filtre -- observation pure, aucun filtre modifié
 
     # Correctif #2 : filtrage par liquidité IMMÉDIATEMENT DISPONIBLE
@@ -246,6 +272,8 @@ def run_exposure_cycle(
     report: PreflightReport,
     k_buy: int,
     k_sell: int,
+    *,
+    churn_state_path: str | None = None,
 ) -> OrchestrationResult:
     """Exécute un cycle : reconstruction, sélection, annulation, délégation.
 
@@ -259,11 +287,14 @@ def run_exposure_cycle(
 
     L'identité de chaque ordre matérialisé est déterminée à partir de la
     dernière occurrence remplie de la cellule.
+
+    `churn_state_path` : transmis tel quel à plan_exposure() -- voir sa
+    docstring (None par défaut = mécanisme anti-churn désactivé).
     """
 
     inst_id = report.config.inst_id
 
-    plan = plan_exposure(adapter, report, k_buy, k_sell)
+    plan = plan_exposure(adapter, report, k_buy, k_sell, churn_state_path=churn_state_path)
 
     cancelled: list[str] = []
 

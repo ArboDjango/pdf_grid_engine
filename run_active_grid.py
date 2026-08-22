@@ -32,10 +32,14 @@ Réutilise EXCLUSIVEMENT des briques existantes, toutes inchangées :
   - market_reader.read                                 (build_optimized_config UNIQUEMENT, jamais dans run())
   - candidate_economic_validator.validate_candidate     (build_optimized_config UNIQUEMENT)
   - grid_preflight.run_preflight                        (à chaque cycle, même config)
-  - grid_order_orchestrator.run_exposure_cycle           (à chaque cycle, inchangé --
-                                                           inclut le départage déjà en place,
-                                                           préférant un ordre déjà ouvert à
-                                                           distance d'index égale)
+  - grid_order_orchestrator.run_exposure_cycle           (à chaque cycle -- inclut le départage
+                                                           déjà en place, préférant un ordre déjà
+                                                           ouvert à distance d'index égale ; reçoit
+                                                           désormais churn_state_path pour la
+                                                           protection anti-churn N=3, cf.
+                                                           churn_protection.py -- comportement de
+                                                           sélection des ordres inchangé pour toute
+                                                           cellule non CHURN_PROTECTED)
 
 Aucune formule économique, aucune formule de treillis, aucun mécanisme de
 client_order_id, aucune logique de repost n'est réimplémentée ici -- ce
@@ -743,6 +747,7 @@ def run(
             "économique de cette grille n'a jamais été figée. run() refuse "
             "de démarrer."
         )
+    churn_state_path = state_file_path_for(config.inst_id)
     cycles_run = 0
     try:
         while max_cycles is None or cycles_run < max_cycles:
@@ -750,7 +755,9 @@ def run(
             # légitimement (soldes réels, spot_covered), le treillis et q
             # (désormais figés dans config) non.
             report = run_preflight(adapter, config)
-            orchestration_result = run_exposure_cycle(adapter, report, k_buy, k_sell)
+            orchestration_result = run_exposure_cycle(
+                adapter, report, k_buy, k_sell, churn_state_path=churn_state_path,
+            )
             if orchestration_result.activation_result.state != GridActivationState.ACTIVE:
                 print(
                     f"[{orchestration_result.activation_result.state.name}] "

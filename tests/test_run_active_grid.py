@@ -523,3 +523,41 @@ class TestTieBreakPrefersAlreadyOpenOrder:
 
         assert far_sell_root not in adapter.cancelled_orders
         assert adapter.cancelled_orders == []
+
+
+class TestChurnProtectionWiring:
+    """Chantier feature/churn-protection-n3 : run() dérive
+    churn_state_path = state_file_path_for(config.inst_id) et le transmet
+    à run_exposure_cycle -- vérifié ici via le fichier réellement produit,
+    jamais via une inspection du code source (comportement observable,
+    pas implémentation)."""
+
+    def test_run_creates_churn_state_file_at_expected_path(self, tmp_path, monkeypatch):
+        import os
+        from run_active_grid import state_file_path_for
+
+        monkeypatch.chdir(tmp_path)
+        adapter = FakeAdapter()
+        config = grid_config()
+
+        run(adapter, config, max_cycles=1, sleep_fn=lambda s: None)
+
+        expected_path = state_file_path_for(config.inst_id)
+        assert os.path.exists(expected_path)
+
+    def test_run_never_writes_churn_state_outside_its_own_inst_id_file(self, tmp_path, monkeypatch):
+        """Deux instruments distincts ne doivent jamais partager le même
+        fichier d'état anti-churn -- même garantie que pour la config de
+        grille elle-même (state_file_path_for)."""
+        import os
+
+        monkeypatch.chdir(tmp_path)
+        adapter = FakeAdapter()
+        config_a = grid_config(inst_id="XRP-USDC")
+        config_b = grid_config(inst_id="INJ-USDC")
+
+        run(adapter, config_a, max_cycles=1, sleep_fn=lambda s: None)
+        run(adapter, config_b, max_cycles=1, sleep_fn=lambda s: None)
+
+        assert os.path.exists("active_grid_state_XRP-USDC.json")
+        assert os.path.exists("active_grid_state_INJ-USDC.json")

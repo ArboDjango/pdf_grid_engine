@@ -464,17 +464,16 @@ class TestAtomicWrite:
 
 class TestRunUnchanged:
     def test_10_run_function_unchanged(self):
-        """Empreinte mise à jour délibérément (chantier allocated-capital) :
-        run() refuse désormais aussi explicitement de démarrer si
-        config.allocated_capital est None (GridAllocatedCapitalNotFrozen),
-        symétrique à la garde q déjà en place -- aucune autre logique
-        touchée (vérifié ci-dessous : ni market_reader ni load_grid_state
-        n'apparaissent, exactement comme avant)."""
+        """Empreinte mise à jour délibérément (chantier churn-protection-n3) :
+        run() dérive désormais churn_state_path = state_file_path_for(config.inst_id)
+        et le transmet à run_exposure_cycle -- seule addition. Ni
+        market_reader ni load_grid_state n'apparaissent, exactement comme
+        avant ; q et allocated_capital restent inchangés."""
         import hashlib
         import inspect
         source = inspect.getsource(run_active_grid.run)
         digest = hashlib.md5(source.encode()).hexdigest()
-        assert digest == "6940e5ab2782996723709ee6c88acd8c"
+        assert digest == "e042c7d36cc49fed6f3c422faea9bdb2"
         assert "market_reader" not in source
         assert "load_grid_state" not in source
         assert "save_grid_state" not in source
