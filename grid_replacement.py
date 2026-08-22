@@ -75,6 +75,7 @@ from decimal import Decimal, ROUND_DOWN
 
 import market_reader
 from candidate_economic_validator import validate_candidate
+from grid_activation_controller import GridActivationState
 from grid_preflight import PreflightConfig, PreflightError, run_preflight
 from grid_trading_controller import GridTradingController, GridTradingState
 from trellis_calculator import GridGeometry, TrellisCalculator
@@ -551,7 +552,27 @@ def run_replacement_check(
     if state.lifecycle_status == "ACTIVATING":
         frozen = state.pending_config
         activation = GridTradingController().run(adapter, frozen, k_buy=k_buy, k_sell=k_sell)
-        if activation.state != GridTradingState.ACTIVATED:
+
+        # Solution D (chantier validé séparément) : un PARTIALLY_EXPOSED
+        # dû UNIQUEMENT à un filtre de matérialisation (price-limit et/ou
+        # liquidité -- jamais un rejet OKX réel) est traité comme le régime
+        # de croisière le traite déjà lui-même : la grille devient ACTIVE
+        # dès qu'au moins un ordre réel y est exposé (already_open ou
+        # placed), les niveaux filtrés restant simplement non matérialisés,
+        # repris ensuite par le cycle normal -- exactement comme n'importe
+        # quel niveau temporairement hors bande de prix sur une grille déjà
+        # active. Aucune sélection, aucun filtre, aucune géométrie, aucun q
+        # ne sont touchés ici : seule la condition de sortie d'ACTIVATING
+        # change.
+        exposed_without_real_rejection = (
+            activation.activation_result is not None
+            and activation.activation_result.state != GridActivationState.ERROR
+            and not activation.activation_result.failed
+            and (activation.activation_result.placed or activation.activation_result.already_open)
+        )
+        if activation.state != GridTradingState.ACTIVATED and not (
+            activation.state == GridTradingState.PARTIALLY_EXPOSED and exposed_without_real_rejection
+        ):
             return config, False  # retente au cycle suivant, MÊME config gelée
 
         append_history(config, state_path.rsplit(".json", 1)[0])
