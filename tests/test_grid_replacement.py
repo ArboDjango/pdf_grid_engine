@@ -300,6 +300,36 @@ class TestDownwardReplacement:
         assert new_config.p0 != Decimal("0.80")
         assert new_config.gll < Decimal("0.80")  # dépasse le prix de confirmation vers le bas
 
+    def test_6_widening_applies_only_to_breached_side_downward(self, tmp_path):
+        """Symétrique de test_6 (TestUpwardReplacement) pour un dépassement
+        BAS : côté franchi (GLL) : largeur = ATR + déplacement. Côté non
+        franchi (GUL) : largeur ATR seule -- vérifié en comparant à une
+        grille de référence construite SANS aucun remplacement (même
+        marché, même ATR), qui isole la largeur ATR pure."""
+        path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        adapter = FakeAdapter(ticker_price="0.80", candle_closes=[1.000 - i * 0.0008 for i in range(50)])
+
+        new_config, materialize = run_until_materialized(adapter, config, path)
+        assert materialize is True
+
+        # Largeur GUL réellement obtenue (côté non franchi).
+        gul_pct_obtained = (float(new_config.gul) - float(new_config.p0)) / float(new_config.p0)
+
+        # Largeur ATR pure attendue de ce côté, recalculée indépendamment
+        # avec les mêmes conditions de marché.
+        import market_reader
+        conditions = market_reader.read(adapter, "XRP-USDC")
+        sim = grid_replacement._atr_width_pct(conditions.atr_norm_15m, conditions.di_ratio_15m)
+
+        assert gul_pct_obtained == pytest.approx(sim["gul_pct"], rel=1e-6)
+
+        # Côté franchi (GLL) : strictement plus étroit (plus bas) que
+        # l'ATR seul ne le placerait, preuve que le déplacement a bien
+        # été ajouté à la largeur de ce côté.
+        gll_pct_obtained = (float(new_config.p0) - float(new_config.gll)) / float(new_config.p0)
+        assert gll_pct_obtained > sim["gll_pct"]
+
 
 # =============================================================================
 # 11 : nouveau dépassement réel permettant G1 -> G2
