@@ -464,16 +464,17 @@ class TestAtomicWrite:
 
 class TestRunUnchanged:
     def test_10_run_function_unchanged(self):
-        """Empreinte mise à jour délibérément (chantier churn-protection-n3) :
-        run() dérive désormais churn_state_path = state_file_path_for(config.inst_id)
-        et le transmet à run_exposure_cycle -- seule addition. Ni
-        market_reader ni load_grid_state n'apparaissent, exactement comme
-        avant ; q et allocated_capital restent inchangés."""
+        """Empreinte mise à jour délibérément (chantier feature/grid-replacement) :
+        run() appelle désormais grid_replacement.run_replacement_check() en
+        tête de boucle, et court-circuite le cycle (aucun run_preflight,
+        aucun run_exposure_cycle) tant qu'un remplacement de grille est en
+        cours -- seule addition. q et allocated_capital d'une grille active
+        restent inchangés en dehors d'un remplacement complet."""
         import hashlib
         import inspect
         source = inspect.getsource(run_active_grid.run)
         digest = hashlib.md5(source.encode()).hexdigest()
-        assert digest == "e042c7d36cc49fed6f3c422faea9bdb2"
+        assert digest == "74f5b925864e98f9a118143453d78d3b"
         assert "market_reader" not in source
         assert "load_grid_state" not in source
         assert "save_grid_state" not in source

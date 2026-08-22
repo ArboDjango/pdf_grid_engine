@@ -271,13 +271,13 @@ class TestRunUnchanged:
     def test_8_run_source_hash_unchanged(self):
         """Empreinte mise à jour délibérément -- voir
         test_run_active_grid_auto_mode.py::TestRunUnchanged pour la
-        justification complète (chantier churn-protection-n3, run() dérive
-        et transmet désormais churn_state_path, aucune autre logique
-        touchée)."""
+        justification complète (chantier feature/grid-replacement, run()
+        appelle désormais grid_replacement.run_replacement_check() en tête
+        de boucle, aucune autre logique touchée)."""
         import hashlib
         import inspect
         digest = hashlib.md5(inspect.getsource(run_active_grid.run).encode()).hexdigest()
-        assert digest == "e042c7d36cc49fed6f3c422faea9bdb2"
+        assert digest == "74f5b925864e98f9a118143453d78d3b"
 
 
 # ---------------------------------------------------------------------------

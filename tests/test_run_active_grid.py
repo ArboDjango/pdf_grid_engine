@@ -37,7 +37,7 @@ class FakeAdapter:
     place_post_only_limit, dont l'usage légitime (repost) est explicitement
     autorisé et suivi via placed_orders, jamais silencieux."""
 
-    def __init__(self, *, base="20000", quote="20000", maker="-0.0008", taker="-0.001", tick="0.0001", lot="0.1", minimum="0.1"):
+    def __init__(self, *, base="20000", quote="20000", maker="-0.0008", taker="-0.001", tick="0.0001", lot="0.1", minimum="0.1", ticker_price="1.0013"):
         self.instrument = InstrumentRules("XRP-USDC", "XRP", "USDC", Decimal(tick), Decimal(lot), Decimal(minimum), None, 4, 1, "live")
         self.fees = FeeRates("XRP-USDC", Decimal(maker), Decimal(taker))
         self.balances = Balances(Decimal(base), Decimal(quote), Decimal(base), Decimal(quote))
@@ -47,9 +47,17 @@ class FakeAdapter:
         self.placed_orders = []
         self.cancelled_orders = []
         self.forbidden_calls = []
+        # Prix par défaut = P0 de grid_config() -- reste dans [GLL, GUL],
+        # ne déclenche jamais le mécanisme de remplacement (grid_replacement.py)
+        # dans les tests qui n'ont pas explicitement besoin de le tester.
+        self.ticker_price = Decimal(ticker_price)
 
     def get_instrument(self, inst_id):
         return self.instrument
+
+    def get_ticker(self, inst_id):
+        from okx_spot_adapter import Ticker
+        return Ticker(inst_id=inst_id, last=self.ticker_price, ts=1)
 
     def get_fee_rates(self, inst_id):
         return self.fees

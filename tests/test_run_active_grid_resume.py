@@ -134,9 +134,16 @@ class FakeAdapter:
         return self.balances
 
     def get_ticker(self, inst_id):
-        # Surveillé explicitement : ne doit JAMAIS être appelé pour définir P0 (test F).
+        # Surveillé explicitement (test F, via get_ticker_calls) : ne doit
+        # jamais être appelé par build_historical_config ni par le chemin
+        # READ-ONLY de main() pour définir P0. grid_replacement.py appelle
+        # légitimement get_ticker DEPUIS run() (jamais pour définir P0 --
+        # seulement pour détecter un dépassement de borne) ; ne PAS lever
+        # ici pour ne pas casser les tests qui exercent run() -- le
+        # compteur reste le moyen de vérification, pas une exception.
         self.get_ticker_calls += 1
-        raise AssertionError("get_ticker() ne doit jamais être appelé pour définir P0 de cette grille reprise")
+        from okx_spot_adapter import Ticker
+        return Ticker(inst_id=inst_id, last=Decimal("0.9982"), ts=1)
 
     def list_open_orders(self, inst_id, client_order_id=None):
         if client_order_id is None:

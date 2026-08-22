@@ -147,13 +147,23 @@ class TestComputedOnce:
         run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC")
         assert fake_adapter.get_ticker_calls == 1
 
-    def test_2_get_ticker_never_called_again_during_subsequent_cycles(self, fake_adapter):
+    def test_2_p0_never_recomputed_during_subsequent_cycles(self, fake_adapter):
+        """Chantier feature/grid-replacement (postérieur à ce test) :
+        grid_replacement.run_replacement_check appelle désormais get_ticker
+        à CHAQUE cycle -- mais exclusivement pour détecter un dépassement
+        de borne (mécanisme de remplacement), jamais pour redéfinir P0 de
+        LA MÊME grille. Le ticker de ce fixture reste fixe et égal à P0
+        (aucun dépassement possible) : la boucle DOIT donc engager le
+        mécanisme (get_ticker appelé, une fois par cycle) sans jamais
+        déclencher le moindre remplacement (aucune annulation d'ordre liée
+        à grid_replacement)."""
         config = run_active_grid.build_optimized_config(fake_adapter, "XRP-USDC", allocated_capital_usdc=Decimal("200"))
         calls_after_creation = fake_adapter.get_ticker_calls
 
         run_active_grid.run(fake_adapter, config, max_cycles=3, sleep_fn=lambda s: None)
 
-        assert fake_adapter.get_ticker_calls == calls_after_creation  # inchangé pendant la boucle
+        assert fake_adapter.get_ticker_calls == calls_after_creation + 3  # 1 appel/cycle, détection uniquement
+        assert fake_adapter.cancelled_orders == []  # aucun remplacement déclenché
 
 
 # ---------------------------------------------------------------------------

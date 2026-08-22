@@ -87,6 +87,7 @@ import time
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 
+import grid_replacement
 import market_reader
 from candidate_economic_validator import validate_candidate
 from grid_activation_controller import GridActivationState
@@ -751,9 +752,25 @@ def run(
     cycles_run = 0
     try:
         while max_cycles is None or cycles_run < max_cycles:
-            # Même `config`, jamais recalculé -- report peut varier
-            # légitimement (soldes réels, spot_covered), le treillis et q
-            # (désormais figés dans config) non.
+            # `config` n'est recalculé QUE par grid_replacement.py, et
+            # UNIQUEMENT lorsqu'un remplacement complet de grille vient
+            # d'aboutir (nouvelle identité déjà persistée et activée) --
+            # jamais par run_preflight, qui continue de recevoir `config`
+            # tel quel à chaque cycle (report peut varier légitimement --
+            # soldes réels, spot_covered -- le treillis et q non, sauf
+            # remplacement).
+            config, materialize = grid_replacement.run_replacement_check(
+                adapter, config, k_buy, k_sell, churn_state_path,
+            )
+            if not materialize:
+                # Remplacement en cours (annulation ou activation pas
+                # encore abouties) -- aucune grille officiellement active
+                # ce cycle, donc aucune matérialisation possible.
+                cycles_run += 1
+                if max_cycles is None:
+                    sleep_fn(cycle_interval)
+                continue
+
             report = run_preflight(adapter, config)
             orchestration_result = run_exposure_cycle(
                 adapter, report, k_buy, k_sell, churn_state_path=churn_state_path,
