@@ -92,6 +92,54 @@ class TestSimulatedBalances:
 # =============================================================================
 
 
+class TestReportUsesConfirmationPriceNotLastPrice:
+    """Régression : le rapport final doit afficher le déplacement_pct
+    RÉELLEMENT utilisé pour construire la nouvelle grille (prix au moment
+    de la confirmation), jamais dry_adapter.last_price_seen qui continue
+    d'avancer pendant les cycles post-remplacement (détection sur la
+    NOUVELLE grille)."""
+
+    def test_displayed_deplacement_pct_matches_confirmation_price_not_final_price(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        state_path = str(tmp_path / "active_grid_state_XRP-USDC.json")
+        config = grid_config()
+        write_real_state(state_path, config)
+
+        fake = FakeAdapter(ticker_price="1.20")
+
+        monkeypatch.setattr(dry_run_replacement, "build_adapter", lambda mode: fake)
+        # Confirmation à 1.20, puis le scénario se poursuit largement
+        # au-delà (jusqu'à 1.24) APRÈS la matérialisation -- exactement le
+        # cas qui faisait dériver l'ancien rapport.
+        prices = (
+            ["1.02", "1.02", "1.08", "1.15", "1.20"] + ["1.20"] * 26
+            + ["1.21", "1.22", "1.23", "1.24"] * 3
+        )
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "dry_run_replacement.py", "--inst-id", "XRP-USDC", "--state-file", state_path,
+                "--max-cycles", str(len(prices) + 5),
+                "--prices", ",".join(prices),
+            ],
+        )
+
+        rc = dry_run_replacement.main()
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "REMPLACEMENT MATÉRIALISÉ" in out
+
+        prix_confirmation_reel = Decimal("1.20")
+        prix_final_scenario = Decimal("1.24")
+        deplacement_attendu = abs(float(prix_confirmation_reel) - float(config.gul)) / float(config.gul)
+        deplacement_si_bug = abs(float(prix_final_scenario) - float(config.gul)) / float(config.gul)
+
+        assert f"déplacement_pct  = {deplacement_attendu}" in out
+        assert f"P0_new != prix_confirmation ({prix_confirmation_reel})" in out
+        assert str(deplacement_si_bug) not in out  # preuve que le bug (1.24) n'est plus affiché
+
+
 class TestFullMaterializationReachesActivated:
     def test_replacement_materializes_and_no_real_write_happens(self, tmp_path, monkeypatch, capsys):
         state_path = str(tmp_path / "active_grid_state_XRP-USDC.json")

@@ -399,6 +399,7 @@ def main() -> int:
     history: list[tuple[int, str, str, bool]] = []  # (cycle, pre_status, post_status, materialize)
     replacement_completed_at: int | None = None
     observed_direction: str | None = None
+    observed_confirmation_price: Decimal | None = None
 
     for cycle in range(1, args.max_cycles + 1):
         pre_state = grid_replacement.load_replacement_state(dry_state_path)
@@ -423,6 +424,16 @@ def main() -> int:
         # appliqué à P0_new).
         if post_state.direction is not None:
             observed_direction = post_state.direction
+            # Capturé UNE SEULE FOIS, à la toute première transition hors de
+            # ACTIVE -- c'est exactement le prix que grid_replacement.py a lu
+            # via get_ticker() pour confirmer le dépassement et calculer
+            # déplacement_pct (voir compute_new_config). dry_adapter.last_price_seen
+            # continue d'avancer à chaque cycle suivant (y compris après
+            # matérialisation, pour la détection sur la NOUVELLE grille) --
+            # le lire plus tard donnerait un prix différent de celui
+            # réellement utilisé pour construire cette configuration.
+            if observed_confirmation_price is None:
+                observed_confirmation_price = dry_adapter.last_price_seen
 
         if new_config != config:
             print(f"    >>> REMPLACEMENT MATÉRIALISÉ au cycle {cycle} <<<")
@@ -457,7 +468,7 @@ def main() -> int:
     borne_old = real_config.gul if direction == "UP" else real_config.gll
     instrument = dry_adapter.get_instrument(args.inst_id)
     expected_p0 = grid_replacement._round_down(borne_old, instrument.tick_size) if direction in ("UP", "DOWN") else None
-    prix_confirmation = dry_adapter.last_price_seen
+    prix_confirmation = observed_confirmation_price
     deplacement_pct = None
     if prix_confirmation is not None and borne_old:
         deplacement_pct = abs(float(prix_confirmation) - float(borne_old)) / float(borne_old)
