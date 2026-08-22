@@ -18,6 +18,15 @@ DryRunAdapter (ci-dessous) enveloppe l'adaptateur OKX réel :
     est simulé en mémoire (carnet d'ordres fictif) et journalisé dans
     dry_adapter.write_calls pour preuve, à la fin de l'exécution, qu'aucune
     écriture réelle n'a eu lieu.
+  - place_market_buy met à jour un ledger de bookkeeping PUREMENT LOCAL
+    (base += quantité, quote -= quantité * prix -- même formule que le
+    FakeAdapter déjà validé par tests/test_grid_replacement.py), lu ensuite
+    par get_balances() en plus de la valeur réelle. Aucune décision
+    économique n'est prise ici (required_spot/spot_covered/q restent
+    calculés par le moteur réel, inchangé) -- seule la conséquence
+    comptable mécanique d'un fill déjà décidé par le moteur est rendue
+    visible, pour permettre au scénario de remplacement d'aller jusqu'à
+    ACTIVATED quand un achat patrimonial initial est nécessaire.
   - list_open_orders / get_order : combinent un INSTANTANÉ RÉEL, lu UNE
     SEULE FOIS en lecture seule au premier appel (les ordres de grille
     actuellement ouverts sur OKX), avec les ordres placés/annulés en
@@ -64,6 +73,7 @@ from decimal import Decimal, InvalidOperation
 import churn_protection
 import grid_replacement
 import market_reader
+from grid_preflight import run_preflight
 from grid_replacement import _atr_width_pct
 from okx_spot_adapter import CancelResult, OkxApiError, OrderSnapshot, PlacementResult, Ticker
 from run_active_grid import K_BUY, K_SELL, load_grid_state, state_file_path_for
@@ -131,6 +141,19 @@ class DryRunAdapter:
         self._real_open_snapshot: dict[str, OrderSnapshot] | None = None
         self.write_calls: list[str] = []
         self.last_price_seen: Decimal | None = None
+        # Ledger de bookkeeping PUREMENT LOCAL, jamais écrit nulle part --
+        # applique uniquement la conséquence comptable mécanique d'un fill
+        # de market buy SIMULÉ (voir place_market_buy) : base += quantité,
+        # quote -= quantité * prix. Aucune décision économique n'est prise
+        # ici (required_spot, spot_covered, q restent calculés par le
+        # moteur réel, inchangé) -- ce ledger ne fait que rendre visible,
+        # pour get_balances(), l'effet d'un achat que le moteur a déjà
+        # décidé et que ce harnais a déjà accepté de simuler. Nul tant
+        # qu'aucun place_market_buy() n'a été simulé : get_balances()
+        # reste alors un passthrough réel strict, comportement inchangé.
+        self._shadow_base_delta = Decimal("0")
+        self._shadow_quote_delta = Decimal("0")
+        self.simulated_fills: list[tuple[Decimal, Decimal]] = []  # (quantité, coût)
 
     # ---- lectures déléguées telles quelles (GET uniquement) ----
     def get_instrument(self, inst_id):
@@ -143,7 +166,22 @@ class DryRunAdapter:
         return self._real.get_account_config()
 
     def get_balances(self, base_ccy, quote_ccy):
-        return self._real.get_balances(base_ccy, quote_ccy)
+        real = self._real.get_balances(base_ccy, quote_ccy)
+        if self._shadow_base_delta == 0 and self._shadow_quote_delta == 0:
+            return real  # aucun fill simulé -- passthrough réel strict, inchangé
+        adjusted = type(real)(
+            real.base_available + self._shadow_base_delta,
+            real.quote_available + self._shadow_quote_delta,
+            real.base_total + self._shadow_base_delta,
+            real.quote_total + self._shadow_quote_delta,
+        )
+        self._log(
+            f"  [DRY-RUN] get_balances({base_ccy}/{quote_ccy}) -> réel {real.base_available}/"
+            f"{real.quote_available} + delta simulé {self._shadow_base_delta}/"
+            f"{self._shadow_quote_delta} = {adjusted.base_available}/{adjusted.quote_available} "
+            f"(lecture réelle, ajustement local uniquement)"
+        )
+        return adjusted
 
     def get_price_limit(self, inst_id):
         return self._real.get_price_limit(inst_id)
@@ -229,14 +267,26 @@ class DryRunAdapter:
 
     def place_market_buy(self, inst_id, quantity, client_order_id):
         self.write_calls.append(f"place_market_buy(qty={quantity}, id={client_order_id})")
+        price = self.last_price_seen if self.last_price_seen is not None else self._prices.next()
+        cost = quantity * price
         self._log(
             f"  [DRY-RUN] SIMULÉ place_market_buy({quantity}, {client_order_id}) -- AUCUN appel "
-            f"réel à OKX -- AVERTISSEMENT : les soldes réels (get_balances) ne sont PAS "
-            f"mis à jour par ce harnais ; si un achat patrimonial était réellement requis, "
-            f"le dry-run le retentera indéfiniment sans jamais atteindre ACTIVATED "
-            f"(comportement sûr par défaut, pas une régression)."
+            f"réel à OKX."
         )
-        price = self.last_price_seen if self.last_price_seen is not None else self._prices.next()
+        # Bookkeeping SIMULÉ : conséquence comptable mécanique d'un fill déjà
+        # décidé par le moteur (required_spot/spot_covered), jamais une
+        # décision économique prise ici. Même formule que le FakeAdapter déjà
+        # validé par tests/test_grid_replacement.py (base += quantité, quote
+        # -= quantité * prix, sans frais -- cohérence avec la référence
+        # existante plutôt qu'une hypothèse de frais non vérifiée).
+        self._shadow_base_delta += quantity
+        self._shadow_quote_delta -= cost
+        self.simulated_fills.append((quantity, cost))
+        self._log(
+            f"  [DRY-RUN] solde SIMULÉ mis à jour (bookkeeping seul, aucun échange réel) : "
+            f"base +{quantity}, quote -{cost} (delta cumulé : {self._shadow_base_delta} / "
+            f"{self._shadow_quote_delta})"
+        )
         snapshot = OrderSnapshot(
             order_id=f"DRYRUN-{client_order_id[-10:]}", client_order_id=client_order_id,
             inst_id=inst_id, side="BUY", price=price, quantity=quantity,
@@ -252,13 +302,13 @@ class DryRunAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _fmt_config_block(label: str, config) -> str:
+def _fmt_config_block(label: str, config, suffix: str = "") -> str:
     lines = [f"{label}:"]
-    lines.append(f"  P0  = {config.p0}")
-    lines.append(f"  GLL = {config.gll}")
-    lines.append(f"  GUL = {config.gul}")
-    lines.append(f"  q   = {config.q}")
-    lines.append(f"  allocated_capital = {config.allocated_capital}")
+    lines.append(f"  P0{suffix}  = {config.p0}")
+    lines.append(f"  GLL{suffix} = {config.gll}")
+    lines.append(f"  GUL{suffix} = {config.gul}")
+    lines.append(f"  q{suffix}   = {config.q}")
+    lines.append(f"  allocated_capital{suffix} = {config.allocated_capital}")
     return "\n".join(lines)
 
 
@@ -392,18 +442,16 @@ def main() -> int:
                 f"Dépassement confirmé (état bloqué en {last_status}) mais la matérialisation n'a "
                 f"pas abouti dans les {args.max_cycles} cycles fournis. Causes possibles :\n"
                 f"  - annulation de l'ancienne génération pas encore vérifiée vide (CANCELLING) ;\n"
-                f"  - un achat patrimonial initial (place_market_buy) a été SIMULÉ mais, par "
-                f"construction, ne met jamais à jour les soldes réels lus par get_balances -- si "
-                f"la nouvelle grille avait réellement besoin de cet achat, le dry-run reste "
-                f"bloqué indéfiniment en ACTIVATING (voir les lignes [DRY-RUN] SIMULÉ "
-                f"place_market_buy ci-dessus) ; c'est le comportement SÛR attendu, pas un bug ;\n"
                 f"  - placement des niveaux de grille encore en cours (K_BUY/K_SELL limitent le "
                 f"nombre de niveaux posés par cycle) -- relancez avec --max-cycles plus élevé et/ou "
-                f"--resume."
+                f"--resume ;\n"
+                f"  - si un achat patrimonial initial a été nécessaire (voir lignes [DRY-RUN] SIMULÉ "
+                f"place_market_buy ci-dessus), son effet sur les soldes EST simulé par ce harnais "
+                f"(bookkeeping local) -- si le blocage persiste malgré cela, le problème est "
+                f"probablement réel (required_spot/spot_covered) et mérite investigation, pas un "
+                f"relancement aveugle."
             )
         return 0
-
-    print(_fmt_config_block("NEW (grille de remplacement, activée par ce dry-run)", config))
 
     direction = observed_direction or "?"
     borne_old = real_config.gul if direction == "UP" else real_config.gll
@@ -416,20 +464,51 @@ def main() -> int:
 
     conditions = market_reader.read(dry_adapter, args.inst_id)
     atr_ref = _atr_width_pct(conditions.atr_norm_15m, conditions.di_ratio_15m)
+    gul_pct_atr = atr_ref["gul_pct"] if direction == "UP" else atr_ref["gll_pct"]
 
-    print(f"\ndirection         = {direction}")
-    print(f"borne franchie     = {borne_old}  (P0_new attendu = round_down(borne franchie, tick_size), jamais le prix courant)")
-    print(f"P0_new == round_down(borne_old, tick_size) ? {config.p0 == expected_p0}")
-    print(f"prix_confirmation  = {prix_confirmation}")
-    print(f"déplacement_pct    = {deplacement_pct}")
-    print(
-        f"gul_pct_ATR (référence recalculée indépendamment, mêmes bougies) = "
-        f"{atr_ref['gul_pct'] if direction == 'UP' else atr_ref['gll_pct']}"
-    )
-    print(
-        f"gll_pct_ATR (référence, côté NON franchi, doit rester inchangé)  = "
-        f"{atr_ref['gll_pct'] if direction == 'UP' else atr_ref['gul_pct']}"
-    )
+    print(_fmt_config_block("NEW (grille de remplacement, activée par ce dry-run)", config, suffix="_new"))
+    print(f"  direction        = {direction}")
+    print(f"  déplacement_pct  = {deplacement_pct}")
+    print(f"  gul_pct_ATR      = {gul_pct_atr}  (côté franchi -- référence ATR recalculée indépendamment, mêmes bougies)")
+
+    # --- Vérification EXPLICITE de l'invariant (point 6 demandé) ---
+    print("\n========== INVARIANT P0_new = borne franchie ==========")
+    if direction == "UP":
+        print(f"dépassement HAUT : P0_new == GUL_old ?")
+        print(f"  GUL_old (brut, non arrondi)        = {real_config.gul}")
+    elif direction == "DOWN":
+        print(f"dépassement BAS : P0_new == GLL_old ?")
+        print(f"  GLL_old (brut, non arrondi)         = {real_config.gll}")
+    else:
+        print("direction non observée -- invariant non vérifiable")
+    if direction in ("UP", "DOWN"):
+        tick_diff = abs(float(borne_old) - float(expected_p0))
+        print(f"  round_down(borne_old, tick_size)   = {expected_p0}  (tick_size={instrument.tick_size})")
+        print(f"  P0_new (config activée)            = {config.p0}")
+        print(f"  P0_new == round_down(borne_old, tick_size) : {'OK' if config.p0 == expected_p0 else 'ÉCHEC'}")
+        print(
+            f"  (égalité vérifiée contre la borne ARRONDIE au tick -- l'égalité brute contre "
+            f"{borne_old} ne peut structurellement pas tenir, écart de {tick_diff} < 1 tick, "
+            f"c'est l'arrondi obligatoire de run_preflight, pas une approximation de ce harnais)"
+        )
+        print(f"  P0_new != prix_confirmation ({prix_confirmation}) : "
+              f"{'OK' if config.p0 != prix_confirmation else 'ÉCHEC'} (jamais le prix courant)")
+
+    # --- Niveaux min/max de la nouvelle grille (point 7 demandé) ---
+    report = run_preflight(dry_adapter, config)
+    print("\n========== NIVEAUX DE LA NOUVELLE GRILLE ==========")
+    print(f"nombre de niveaux : {len(report.trellis)} (nl={config.nl} BUY, nu={config.nu} SELL, + P0)")
+    print(f"niveau min = {min(report.trellis)}")
+    print(f"niveau max = {max(report.trellis)}")
+
+    if dry_adapter.simulated_fills:
+        total_qty = sum(q for q, _ in dry_adapter.simulated_fills)
+        total_cost = sum(c for _, c in dry_adapter.simulated_fills)
+        print(
+            f"\nAchat(s) patrimonial(aux) SIMULÉ(S) pendant ce dry-run : {len(dry_adapter.simulated_fills)} "
+            f"(quantité totale {total_qty}, coût simulé total {total_cost}) -- bookkeeping local uniquement, "
+            f"AUCUN ordre réel envoyé à OKX."
+        )
 
     print("\n========== CHECKLIST DES 14 POINTS DEMANDÉS ==========\n")
 
